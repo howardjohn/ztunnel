@@ -65,4 +65,8 @@ rustc_version = "0.4.0"
 opt-level = 3
 codegen-units = 1
 lto = true
+
+[dev-dependencies]
+clap-verbosity-flag = "1.0.0"
+netperf = "0.2.3"
 #debug = true

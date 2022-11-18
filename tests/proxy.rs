@@ -15,9 +15,13 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
+use clap_verbosity_flag::ErrorLevel;
 use hyper::{Body, Client, Method, Request};
+use once_cell::sync::Lazy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::time;
+use tracing::error;
 
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::*;
@@ -117,4 +121,79 @@ async fn admin_shutdown(addr: SocketAddr) {
     let client = Client::new();
     let resp = client.request(req).await.expect("admin shutdown request");
     assert_eq!(resp.status(), hyper::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_throughput() {
+    helpers::initialize_telemetry();
+    initialize_netperf().await;
+
+    run_client(NETPERF_PORT).await;
+}
+
+const NETPERF_PORT: u16 = 17559;
+static THROUGHPUT_SERVER_INIT: Lazy<()> = Lazy::new(|| {
+    spawn_netperf_server(NETPERF_PORT);
+});
+
+async fn wait_for_port(port: u16) {
+    for _ in 0..100 {
+        if let Ok(_) = TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+            return
+        }
+        time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn initialize_netperf() {
+    Lazy::force(&THROUGHPUT_SERVER_INIT);
+    wait_for_port(NETPERF_PORT).await;
+}
+
+fn spawn_netperf_server(port: u16) {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(run_netperf_server(port));
+    });
+}
+
+async fn run_netperf_server(port: u16) {
+    netperf::server::run_server(netperf_opts(port))
+        .await
+        .unwrap()
+}
+
+fn netperf_opts(port: u16) -> netperf::common::opts::Opts {
+    use netperf::common::opts::ClientOpts;
+    use netperf::common::opts::CommonOpts;
+    use netperf::common::opts::Opts;
+    use netperf::common::opts::ServerOpts;
+    Opts {
+        server_opts: ServerOpts {
+            server: true,
+            one_off: true,
+        },
+        client_opts: ClientOpts {
+            client: Some("localhost".to_string()),
+            length: None,
+            socket_buffers: None,
+            time: 2,
+            parallel: 1,
+            bidir: false,
+            reverse: false,
+            no_delay: false,
+        },
+        common_opts: CommonOpts { port, interval: 1 },
+        verbose: clap_verbosity_flag::Verbosity::<ErrorLevel>::new(0, 0),
+    }
+}
+async fn run_client(port: u16) {
+    use netperf::common::opts::ClientOpts;
+    use netperf::common::opts::CommonOpts;
+    use netperf::common::opts::Opts;
+    use netperf::common::opts::ServerOpts;
+    netperf::client::run_client(netperf_opts(port))
+        .await
+        .unwrap();
+    error!("client done");
 }
