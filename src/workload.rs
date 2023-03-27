@@ -428,8 +428,11 @@ pub struct LocalWorkload {
 #[derive(Default, Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalConfig {
+    #[serde(default)]
     pub workloads: Vec<LocalWorkload>,
+    #[serde(default)]
     pub policies: Vec<Authorization>,
+    #[serde(default)]
     pub services: Vec<Service>,
 }
 
@@ -440,21 +443,24 @@ impl LocalClient {
         let data = self.cfg.read_to_string().await?;
         trace!("local config: {data}");
         let r: LocalConfig = serde_yaml::from_str(&data)?;
-        let mut wli = self.workloads.lock().unwrap();
-        let workloads = r.workloads.len();
-        let policies = r.policies.len();
-        for wl in r.workloads {
-            let wip = wl.workload.workload_ip;
-            debug!(
-                "inserting local workloads {wip} ({}/{})",
-                &wl.workload.namespace, &wl.workload.name
-            );
-            wli.insert_workload(wl.workload, wl.vips)?;
+        {
+            let mut wli = self.workloads.lock().unwrap();
+            let workloads = r.workloads.len();
+            let policies = r.policies.len();
+            for wl in r.workloads {
+                let wip = wl.workload.workload_ip;
+                debug!(
+                    "inserting local workloads {wip} ({}/{})",
+                    &wl.workload.namespace, &wl.workload.name
+                );
+                wli.insert_workload(wl.workload, wl.vips)?;
+            }
+            for rbac in r.policies {
+                wli.insert_authorization(rbac);
+            }
+            info!(%workloads, %policies, "local config initialized");
         }
-        for rbac in r.policies {
-            wli.insert_authorization(rbac);
-        }
-        info!(%workloads, %policies, "local config initialized");
+        error!("{}", serde_json::to_string(&self.workloads).unwrap());
         Ok(())
     }
 }
@@ -665,7 +671,7 @@ impl WorkloadStore {
             namespace: Some(s.namespace),
             hostname: Some(s.hostname),
             ports: Some((&PortList { ports: s.ports }).into()),
-            endpoints: endpoints,
+            endpoints,
         };
         // Replace Service, but keep existing endpoints. This handles the case where the endpoints arrived before the Service.
         self.vips.insert(ip, svc);
@@ -675,7 +681,8 @@ impl WorkloadStore {
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
         let widentity = workload.identity();
-        let vips = w.virtual_ips
+        let vips = w
+            .virtual_ips
             .into_iter()
             .map(|(k, v)| (k, <HashMap<u16, u16>>::from(&v)))
             .collect();
@@ -738,7 +745,11 @@ impl WorkloadStore {
         }
     }
 
-    fn insert_workload(&mut self, w: Workload, vips: HashMap<String, HashMap<u16, u16>>) -> anyhow::Result<()> {
+    fn insert_workload(
+        &mut self,
+        w: Workload,
+        vips: HashMap<String, HashMap<u16, u16>>,
+    ) -> anyhow::Result<()> {
         let wip = w.workload_ip;
         // First, remove the entry entirely to make sure things are cleaned up properly. Note this is
         // under a lock, so there is no race here.
@@ -791,10 +802,7 @@ impl WorkloadStore {
 
     fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
         if let Some(svc) = self.vips.get(&addr.ip()) {
-            let Some(target_port) = svc.ports.as_ref().and_then(|m| m.get(&addr.port())) else {
-                debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
-                return None
-            };
+            let service_target_port = svc.ports.as_ref().and_then(|m| m.get(&addr.port()));
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
             let Some((_, ep)) = svc.endpoints.iter().choose(&mut rand::thread_rng()) else {
@@ -806,7 +814,10 @@ impl WorkloadStore {
                 return None
             };
             // If endpoint overrides the target port, use that instead
-            let target_port = ep.port.get(&addr.port()).unwrap_or(target_port);
+            let Some(target_port) = ep.port.get(&addr.port()).or(service_target_port) else {
+                debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
+                return None
+            };
             let mut us = Upstream {
                 workload: wl.to_owned(),
                 port: *target_port,
