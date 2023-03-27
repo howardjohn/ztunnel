@@ -363,8 +363,8 @@ impl Inbound {
         upstream: &Workload,
         conn: &Connection,
     ) -> (bool, bool) {
-        let has_waypoint = !upstream.waypoint_addresses.is_empty();
-        for i in upstream.waypoint_addresses.iter() {
+        let has_waypoint = upstream.waypoint_address.is_some();
+        for i in upstream.waypoint_address.iter() {
             if workloads.fetch_workload(i).await.map(|w| w.identity()) == conn.src_identity {
                 return (has_waypoint, true);
             }

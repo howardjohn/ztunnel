@@ -36,6 +36,7 @@ use crate::identity::{Identity, SecretManager};
 use crate::metrics::Metrics;
 use crate::rbac::{Authorization, RbacScope};
 use crate::workload::WorkloadError::EnumParse;
+use crate::xds::istio::workload::gateway_address::Address;
 use crate::xds::istio::workload::PortList;
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, rbac, readiness, xds};
@@ -87,7 +88,9 @@ impl TryFrom<Option<xds::istio::workload::WorkloadStatus>> for HealthStatus {
 pub struct Workload {
     pub workload_ip: IpAddr,
     #[serde(default)]
-    pub waypoint_addresses: Vec<IpAddr>,
+    /// Currently we assume IP:15008, but the proto allows hostnames and arbitrary ports.
+    /// TODO: support the full proto
+    pub waypoint_address: Option<IpAddr>,
     #[serde(default)]
     pub gateway_address: Option<SocketAddr>,
     #[serde(default)]
@@ -136,7 +139,7 @@ impl Workload {
         }
     }
     pub fn choose_waypoint_address(&self) -> Option<IpAddr> {
-        self.waypoint_addresses
+        self.waypoint_address
             .iter()
             .choose(&mut rand::thread_rng())
             .copied()
@@ -210,15 +213,33 @@ impl TryFrom<&XdsWorkload> for Workload {
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
         let resource: XdsWorkload = resource.to_owned();
 
-        let mut waypoint_addresses: Vec<IpAddr> = Vec::new();
-        for addr in &resource.waypoint_addresses {
-            waypoint_addresses.push(byte_to_ip(addr)?)
-        }
+        let waypoint_address = if let Some(ga) = &resource.waypoint {
+            if ga.port != 15008 {
+                return Err(WorkloadError::UnsupportedFeature(
+                    "only port 15008 is valid".into(),
+                ));
+            }
+            match &ga.address {
+                Some(Address::Ip(b)) => Some(byte_to_ip(b)?),
+                Some(Address::Hostname(_)) => {
+                    return Err(WorkloadError::UnsupportedFeature(
+                        "only IP is supported".into(),
+                    ))
+                }
+                None => {
+                    return Err(WorkloadError::UnsupportedFeature(
+                        "address must be set".into(),
+                    ))
+                }
+            }
+        } else {
+            None
+        };
         let address = byte_to_ip(&resource.address)?;
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
         Ok(Workload {
             workload_ip: address,
-            waypoint_addresses,
+            waypoint_address,
             gateway_address: None,
 
             protocol: Protocol::try_from(xds::istio::workload::Protocol::from_i32(
@@ -872,6 +893,8 @@ pub enum WorkloadError {
     PrefixParse(#[from] ipnet::PrefixLenError),
     #[error("unknown enum: {0}")]
     EnumParse(String),
+    #[error("unsupported feature: {0}")]
+    UnsupportedFeature(String),
 }
 
 #[cfg(test)]
@@ -1046,6 +1069,7 @@ mod tests {
                 service_port: 80,
                 target_port: 80,
             }],
+            subject_alt_name: vec![],
         })
         .unwrap();
         wi.insert_xds_workload(XdsWorkload {

@@ -174,9 +174,9 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
-    /// Append a waypoint to the workload
+    /// Set a waypoint to the workload
     pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
-        self.w.workload.waypoint_addresses.push(waypoint);
+        self.w.workload.waypoint_address = Some(waypoint);
         self
     }
 

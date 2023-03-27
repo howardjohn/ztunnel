@@ -163,9 +163,9 @@ enum Protocol {
   HTTP = 1;
 }
 
-// GatewayAddres represents the address of a gateway
+// GatewayAddress represents the address of a gateway
 message GatewayAddress {
-  // address can either a hostname (ex: gateway.example.com) or an IP (ex: 1.2.3.4).
+  // address can either be a hostname (ex: gateway.example.com) or an IP (ex: 1.2.3.4).
   oneof address {
     string hostname = 1;
     bytes ip = 2;

@@ -36,6 +36,7 @@ fn main() -> Result<(), anyhow::Error> {
         c.bytes([
             ".istio.workload.Workload",
             ".istio.workload.Service",
+            ".istio.workload.GatewayAddress",
             ".istio.security.Address",
         ]);
         c
