@@ -62,27 +62,6 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
     }
 }
 
-#[derive(
-    Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
-)]
-pub enum HealthStatus {
-    #[default]
-    Healthy,
-    Unhealthy,
-}
-
-impl TryFrom<Option<xds::istio::workload::WorkloadStatus>> for HealthStatus {
-    type Error = WorkloadError;
-
-    fn try_from(value: Option<xds::istio::workload::WorkloadStatus>) -> Result<Self, Self::Error> {
-        match value {
-            Some(xds::istio::workload::WorkloadStatus::Healthy) => Ok(HealthStatus::Healthy),
-            Some(xds::istio::workload::WorkloadStatus::Unhealthy) => Ok(HealthStatus::Unhealthy),
-            None => Err(EnumParse("unknown type".into())),
-        }
-    }
-}
-
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workload {
@@ -122,9 +101,6 @@ pub struct Workload {
 
     #[serde(default)]
     pub authorization_policies: Vec<String>,
-
-    #[serde(default)]
-    pub status: HealthStatus,
 
     #[serde(default)]
     pub cluster_id: String,
@@ -270,10 +246,6 @@ impl TryFrom<&XdsWorkload> for Workload {
             workload_type,
             canonical_name: resource.canonical_name,
             canonical_revision: resource.canonical_revision,
-
-            status: HealthStatus::try_from(xds::istio::workload::WorkloadStatus::from_i32(
-                resource.status,
-            ))?,
 
             native_hbone: resource.native_hbone,
             authorization_policies: resource.authorization_policies,
@@ -477,22 +449,7 @@ impl LocalClient {
                 "inserting local workloads {wip} ({}/{})",
                 &wl.workload.namespace, &wl.workload.name
             );
-            wli.insert_workload(wl.workload);
-            for (vip, pl) in wl.vips {
-                let vip = vip.parse::<IpAddr>()?;
-
-                let ep = Endpoint {
-                    address: wip,
-                    port: pl,
-                };
-                if let Some(svc) = wli.vips.get_mut(&vip) {
-                    svc.endpoints.insert(ep.address, ep);
-                    wli.workload_to_vip.entry(wip).or_default().insert(vip);
-                } else {
-                    // Can happen due to ordering issues
-                    trace!("pod has VIP {vip}, but not found");
-                }
-            }
+            wli.insert_workload(wl.workload, wl.vips)?;
         }
         for rbac in r.policies {
             wli.insert_authorization(rbac);
@@ -631,13 +588,16 @@ impl WorkloadInformation {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+/// A Service represents a service - a collection of workloads with some associated metadata and routing
+/// configuration.
+/// Due to ordering, we may see Services with only endpoints but no other metadata.
+#[derive(Debug, Eq, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Service {
-    name: String,
-    namespace: String,
-    hostname: String,
-    ports: HashMap<u16, u16>,
+    name: Option<String>,
+    namespace: Option<String>,
+    hostname: Option<String>,
+    ports: Option<HashMap<u16, u16>>,
     endpoints: HashMap<IpAddr, Endpoint>,
 }
 
@@ -695,47 +655,31 @@ impl WorkloadStore {
 
     fn insert_xds_service(&mut self, s: XdsService) -> anyhow::Result<()> {
         let ip = byte_to_ip(&s.address)?;
-        // self.vips;
+        let endpoints = self
+            .vips
+            .get(&ip)
+            .map(|svc| svc.endpoints.clone())
+            .unwrap_or_default();
         let svc = Service {
-            name: s.name,
-            namespace: s.namespace,
-            hostname: s.hostname,
-            ports: (&PortList { ports: s.ports }).into(),
-            endpoints: Default::default(),
+            name: Some(s.name),
+            namespace: Some(s.namespace),
+            hostname: Some(s.hostname),
+            ports: Some((&PortList { ports: s.ports }).into()),
+            endpoints: endpoints,
         };
+        // Replace Service, but keep existing endpoints. This handles the case where the endpoints arrived before the Service.
         self.vips.insert(ip, svc);
-        // TODO: populate endpoints, in case we get them out of order
         Ok(())
     }
 
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
-        let wip = workload.workload_ip;
-        // First, remove the entry entirely to make sure things are cleaned up properly. Note this is
-        // under a lock, so there is no race here.
-        self.remove(wip.to_string());
         let widentity = workload.identity();
-        let status = workload.status;
-        self.insert_workload(workload);
-        // Unhealthy workloads are always inserted, as we may get or recieve traffic to them. But we shouldn't
-        // include them in load balancing we do to Services.
-        if status == HealthStatus::Healthy {
-            for (vip, pl) in &w.virtual_ips {
-                let vip = vip.parse::<IpAddr>()?;
-
-                let ep = Endpoint {
-                    address: wip,
-                    port: pl.into(),
-                };
-                if let Some(svc) = self.vips.get_mut(&vip) {
-                    svc.endpoints.insert(ep.address, ep);
-                    self.workload_to_vip.entry(wip).or_default().insert(vip);
-                } else {
-                    // Can happen due to ordering issues
-                    trace!("pod has VIP {vip}, but not found");
-                }
-            }
-        }
+        let vips = w.virtual_ips
+            .into_iter()
+            .map(|(k, v)| (k, <HashMap<u16, u16>>::from(&v)))
+            .collect();
+        self.insert_workload(workload, vips)?;
         if Some(&w.node) == self.local_node.as_ref()
             || (Some(&w.name) == self.local_pod.as_ref()
                 && Some(&w.namespace) == self.local_namespace.as_ref())
@@ -794,9 +738,26 @@ impl WorkloadStore {
         }
     }
 
-    fn insert_workload(&mut self, w: Workload) {
+    fn insert_workload(&mut self, w: Workload, vips: HashMap<String, HashMap<u16, u16>>) -> anyhow::Result<()> {
         let wip = w.workload_ip;
+        // First, remove the entry entirely to make sure things are cleaned up properly. Note this is
+        // under a lock, so there is no race here.
+        self.remove(wip.to_string());
         self.workloads.insert(wip, w);
+        // Unhealthy workloads are always inserted, as we may get or recieve traffic to them. But we shouldn't
+        // include them in load balancing we do to Services.
+        for (vip, pl) in &vips {
+            let vip = vip.parse::<IpAddr>()?;
+
+            let ep = Endpoint {
+                address: wip,
+                port: pl.clone(),
+            };
+            let svc = self.vips.entry(vip).or_default();
+            svc.endpoints.insert(ep.address, ep);
+            self.workload_to_vip.entry(wip).or_default().insert(vip);
+        }
+        Ok(())
     }
 
     fn remove(&mut self, ip: String) {
@@ -830,7 +791,7 @@ impl WorkloadStore {
 
     fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
         if let Some(svc) = self.vips.get(&addr.ip()) {
-            let Some(target_port) = svc.ports.get(&addr.port()) else {
+            let Some(target_port) = svc.ports.as_ref().and_then(|m| m.get(&addr.port())) else {
                 debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
                 return None
             };
