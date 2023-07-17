@@ -33,6 +33,7 @@ use std::{fmt, io};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
 use tracing::{error, trace, warn, Instrument};
+use crate::proxy::out_ip::OutboundIP;
 
 // Only public for testing. Needed by test_util.
 #[cfg(any(test, feature = "testing"))]
@@ -46,6 +47,7 @@ mod outbound;
 mod pool;
 mod socks5;
 mod util;
+mod out_ip;
 
 pub struct Proxy {
     inbound: Inbound,
@@ -53,6 +55,7 @@ pub struct Proxy {
     outbound: Outbound,
     socks5: Socks5,
     dns_proxy: Option<dns::DnsProxy>,
+    outbound_ip: OutboundIP,
 }
 
 #[derive(Clone)]
@@ -87,6 +90,7 @@ impl Proxy {
 
         let inbound_passthrough = InboundPassthrough::new(pi.clone()).await?;
         let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
+        let outbound_ip = OutboundIP::new(pi.clone(), drain.clone()).await?;
         let socks5 = Socks5::new(pi.clone(), drain).await?;
         let dns_proxy = new_dns_proxy(pi.clone()).await?;
 
@@ -94,6 +98,7 @@ impl Proxy {
             inbound,
             inbound_passthrough,
             outbound,
+            outbound_ip,
             socks5,
             dns_proxy,
         })
@@ -104,6 +109,7 @@ impl Proxy {
             tokio::spawn(self.inbound_passthrough.run().in_current_span()),
             tokio::spawn(self.inbound.run().in_current_span()),
             tokio::spawn(self.outbound.run().in_current_span()),
+            tokio::spawn(self.outbound_ip.run().in_current_span()),
             tokio::spawn(self.socks5.run().in_current_span()),
         ];
 

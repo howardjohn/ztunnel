@@ -60,6 +60,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c7d0618f0e0b7e8ff11427422b64564d5fb0be1940354bfe2e0529b18a9d9b8"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
+
+[[package]]
 name = "async-channel"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -614,6 +620,15 @@ checksum = "2d2f06b9cac1506ece98fe3231e3cc9c4410ec3d5b1f24ae1c8946f0742cdefc"
 dependencies = [
  "backtrace",
  "version_check",
+]
+
+[[package]]
+name = "etherparse"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "827292ea592108849932ad8e30218f8b1f21c0dfd0696698a18b5d0aed62d990"
+dependencies = [
+ "arrayvec",
 ]
 
 [[package]]
@@ -2548,6 +2563,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tun"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ee0bf398081bafc543b88b7bf1c066b3fe6bfed69721b69ef47e570247ff8eb"
+dependencies = [
+ "libc",
+ "nix 0.26.2",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3156,6 +3183,7 @@ dependencies = [
  "criterion",
  "diff",
  "drain",
+ "etherparse",
  "futures",
  "futures-util",
  "go-parse-duration",
@@ -3196,6 +3224,7 @@ dependencies = [
  "tokio",
  "tokio-boring",
  "tokio-stream",
+ "tokio-tun",
  "tonic 0.8.3",
  "tonic-build",
  "tower",
