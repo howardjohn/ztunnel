@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use drain::Watch;
+use etherparse::IpHeader;
 use futures::stream::StreamExt;
 use http_body_util::Empty;
 use hyper::body::Incoming;
@@ -261,13 +262,23 @@ impl Inbound {
             match hyper::upgrade::on(req).await {
                 Ok(mut upgraded) => {
                     info!("Handling upgraded TUN connection..");
-                    let mut buf = [0u8; 1024];
+                    let mut buf = [0u8; 2048];
                     loop {
                         let n = upgraded.read(&mut buf).await.unwrap();
                         if n == 0 {
                             break;
                         }
                         info!("inbound reading {} bytes: {:?}", n, &buf[..n]);
+                        let ip = IpHeader::from_slice(&buf[..n]);
+                        match ip {
+                            // TODO: probably need the "rest" part
+                            Ok((IpHeader::Version4(h, _), _, _)) => {
+                                let dst = IpAddr::from(h.destination);
+                                let src = IpAddr::from(h.source);
+                                info!("inbound Read packet {src} -> {dst}");
+                            },
+                            _ => {}
+                        }
                         let mut w = tun.lock().await;
                         let res = w.write(&buf[..n]).await;
                         info!("inbound Wrote: {res:?}");

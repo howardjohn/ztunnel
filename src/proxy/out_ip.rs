@@ -72,7 +72,7 @@ impl OutboundIP {
         }
         let (mut reader, mut _writer) = tokio::io::split(self.tunin);
 
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 2048];
         loop {
             let n = reader.read(&mut buf).await.unwrap();
             info!("tun reading {} bytes: {:?}", n, &buf[..n]);
