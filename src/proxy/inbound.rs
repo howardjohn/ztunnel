@@ -12,7 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::Error;
+use std::fmt;
+use std::fmt::{Display, Formatter};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Instant;
+
+use bytes::Bytes;
+use drain::Watch;
+use futures::stream::StreamExt;
+use http_body_util::Empty;
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tun::Tun;
+use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
+
 use crate::baggage::parse_baggage_header;
 use crate::config::Config;
 use crate::identity::SecretManager;
@@ -26,20 +43,8 @@ use crate::socket::to_canonical;
 use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::tls::TlsError;
-use bytes::Bytes;
-use drain::Watch;
-use futures::stream::StreamExt;
-use http_body_util::Empty;
-use hyper::body::Incoming;
-use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
-use std::fmt;
-use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Instant;
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
+
+use super::Error;
 
 pub(super) struct Inbound {
     cfg: Config,
@@ -48,6 +53,7 @@ pub(super) struct Inbound {
     state: DemandProxyState,
     drain: Watch,
     metrics: Arc<Metrics>,
+    tunout: Arc<tokio::sync::Mutex<Tun>>,
 }
 
 impl Inbound {
@@ -64,6 +70,17 @@ impl Inbound {
             transparent,
             "listener established",
         );
+        let tunout = Arc::new(tokio::sync::Mutex::new(
+            Tun::builder()
+                .name("")
+                .tap(false)
+                .packet_info(false)
+                .mtu(1350)
+                .up()
+                .try_build()
+                .unwrap(),
+        ));
+
         Ok(Inbound {
             cfg: pi.cfg,
             state: pi.state,
@@ -71,6 +88,7 @@ impl Inbound {
             cert_manager: pi.cert_manager,
             metrics: pi.metrics,
             drain,
+            tunout,
         })
     }
 
@@ -86,12 +104,14 @@ impl Inbound {
             network: self.cfg.network.clone(),
         };
         let drain_stream = self.drain.clone();
+        let tun = self.tunout.clone();
         let stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mut stream = stream.take_until(Box::pin(drain_stream.signaled()));
         while let Some(socket) = stream.next().await {
             let state = self.state.clone();
             let metrics = self.metrics.clone();
             let drain = self.drain.clone();
+            let tun = tun.clone();
             let network = self.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
@@ -119,6 +139,7 @@ impl Inbound {
                                 enable_original_source.unwrap_or_default(),
                                 req,
                                 metrics.clone(),
+                                tun.clone(),
                             )
                         }),
                     );
@@ -231,6 +252,39 @@ impl Inbound {
             .unwrap_or_else(TraceParent::new)
     }
 
+    async fn handle_tun(
+        tun: Arc<tokio::sync::Mutex<Tun>>,
+        req: Request<Incoming>,
+    ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
+        info!("Handling TUN connection..");
+        tokio::task::spawn(async move {
+            match hyper::upgrade::on(req).await {
+                Ok(mut upgraded) => {
+                    info!("Handling upgraded TUN connection..");
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        let n = upgraded.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        info!("inbound reading {} bytes: {:?}", n, &buf[..n]);
+                        let mut w = tun.lock().await;
+                        let res = w.write(&buf[..n]).await;
+                        info!("inbound Wrote: {res:?}");
+                    }
+                }
+                Err(e) => {
+                    // Not sure if this can even happen
+                    error!("No upgrade {e}");
+                }
+            }
+        });
+        info!("Done handling TUN connection..");
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .body(Empty::new())
+            .unwrap())
+    }
     #[instrument(name="inbound", skip_all, fields(
         id=%Self::extract_traceparent(&req),
         peer_ip=%conn.src_ip,
@@ -242,7 +296,11 @@ impl Inbound {
         enable_original_source: bool,
         req: Request<Incoming>,
         metrics: Arc<Metrics>,
+        tun: Arc<tokio::sync::Mutex<Tun>>,
     ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
+        if req.headers().get(proxy::TUN_HEADER).is_some() {
+            return Self::handle_tun(tun.clone(), req).await;
+        }
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
@@ -471,7 +529,12 @@ impl crate::tls::CertProvider for InboundCertProvider {
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use std::{
+        collections::HashMap,
+        net::{Ipv4Addr, SocketAddrV4},
+        sync::RwLock,
+    };
+
     use crate::state::workload::NamespacedHostname;
     use crate::{
         identity::Identity,
@@ -481,11 +544,8 @@ mod test {
             workload::gatewayaddress::Destination,
         },
     };
-    use std::{
-        collections::HashMap,
-        net::{Ipv4Addr, SocketAddrV4},
-        sync::RwLock,
-    };
+
+    use super::*;
 
     #[tokio::test]
     async fn check_gateway() {

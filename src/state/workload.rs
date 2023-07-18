@@ -486,7 +486,7 @@ pub fn network_addr(network: &str, vip: IpAddr) -> NetworkAddress {
 #[derive(serde::Serialize, Default, Debug)]
 pub struct WorkloadStore {
     /// workloads is a map of workload network addresses to workloads
-    workloads: HashMap<NetworkAddress, Arc<Workload>>,
+    pub workloads: HashMap<NetworkAddress, Arc<Workload>>,
     /// workloads is a map of workload UIDs to workloads
     workloads_by_uid: HashMap<String, Arc<Workload>>,
     /// policies maintains a mapping of ns/name to policy.

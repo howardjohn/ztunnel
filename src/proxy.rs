@@ -265,6 +265,7 @@ pub struct TraceParent {
     flags: u8,
 }
 
+pub const TUN_HEADER: &str = "tun";
 pub const BAGGAGE_HEADER: &str = "baggage";
 pub const TRACEPARENT_HEADER: &str = "traceparent";
 

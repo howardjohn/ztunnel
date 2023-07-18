@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use crate::identity::SecretManager;
 use crate::metrics::Metrics;
 use crate::proxy::Error;
@@ -28,7 +29,9 @@ use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::ops::Deref;
 use std::sync::{Arc, RwLock};
+use http_body_util::BodyExt;
 use tracing::{debug, trace};
 
 use self::service::Service;
@@ -176,6 +179,21 @@ impl DemandProxyState {
         self.fetch_address(&network_addr(network, addr.ip())).await;
         self.find_upstream(network, addr, hbone_port)
     }
+
+
+    pub async fn fetch_ztunnels(
+        &self,
+    ) -> HashMap<String, Workload> {
+        let state = self.state.read().unwrap();
+        state.workloads.workloads.iter().filter_map(|(_, w)| {
+            if &w.service_account == "ztunnel" {
+                Some((w.node.clone(), w.deref().clone()))
+            } else {
+                None
+            }
+        }).collect()
+    }
+
 
     pub fn find_upstream(
         &self,

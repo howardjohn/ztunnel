@@ -15,12 +15,14 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
+use async_stream::stream;
 use boring::ssl::ConnectConfiguration;
 use bytes::Bytes;
 use drain::Watch;
 use http_body_util::Empty;
 use hyper::header::FORWARDED;
 use hyper::StatusCode;
+use hyper::upgrade::Upgraded;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
@@ -123,7 +125,79 @@ impl OutboundConnection {
         let orig_dst_addr = socket::orig_dst_addr_or_default(&stream);
         self.proxy_to(stream, peer.ip(), orig_dst_addr, false).await
     }
+    pub async fn hbone(&mut self, req: Request) -> Result<Upgraded, Error> {
+        info!(
+            "proxy TUN to {} using HBONE via {} type {:#?}",
+            req.destination, req.gateway, req.request_type
+        );
 
+        let dst_identity = req
+            .expected_identity
+            .as_ref()
+            .expect("hbone requires destination workload");
+
+        let pool_key = pool::Key {
+            src_id: req.source.identity(),
+            dst_id: dst_identity.clone(),
+            dst: req.gateway,
+        };
+
+        // Setup our connection future. This won't always run if we have an existing connection
+        // in the pool.
+        let connect = async {
+            let mut builder = hyper::client::conn::http2::Builder::new(hyper_util::TokioExecutor);
+            let builder = builder
+                .initial_stream_window_size(self.pi.cfg.window_size)
+                .max_frame_size(self.pi.cfg.frame_size)
+                .initial_connection_window_size(self.pi.cfg.connection_window_size);
+
+            let id = &req.source.identity();
+            let cert = self.pi.cert_manager.fetch_certificate(id).await?;
+            let connector = cert
+                .connector(dst_identity)?
+                .configure()
+                .expect("configure");
+            let tcp_stream = TcpStream::connect(req.gateway).await?;
+            tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
+            let tls_stream = connect_tls(connector, tcp_stream).await?;
+            let (request_sender, connection) = builder
+                .handshake(tls_stream)
+                .await
+                .map_err(Error::HttpHandshake)?;
+            // spawn a task to poll the connection and drive the HTTP state
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    error!("Error in HBONE connection handshake: {:?}", e);
+                }
+            });
+            Ok(request_sender)
+        };
+        let mut connection = self.pi.pool.connect(pool_key.clone(), connect).await?;
+        info!("established tun connection");
+
+        let request = hyper::Request::builder()
+            .uri(&req.destination.to_string())
+            .method(hyper::Method::CONNECT)
+            .version(hyper::Version::HTTP_2)
+            .header(
+                BAGGAGE_HEADER,
+                baggage(&req, self.pi.cfg.cluster_id.clone()),
+            )
+            .header(TRACEPARENT_HEADER, self.id.header())
+            .header(proxy::TUN_HEADER, "true")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let response = connection.send_request(request).await?;
+        info!("got response!");
+        let code = response.status();
+        if code != 200 {
+            return Err(Error::HttpStatus(code));
+        }
+        let mut upgraded = hyper::upgrade::on(response).await?;
+
+        Ok(upgraded)
+    }
     pub async fn proxy_to(
         &mut self,
         mut stream: TcpStream,
@@ -466,29 +540,29 @@ fn baggage(r: &Request, cluster: String) -> String {
 }
 
 #[derive(Debug)]
-struct Request {
-    protocol: Protocol,
-    direction: Direction,
-    source: Workload,
-    destination: SocketAddr,
+pub struct Request {
+    pub protocol: Protocol,
+    pub direction: Direction,
+    pub source: Workload,
+    pub destination: SocketAddr,
     // The intended destination workload. This is always the original intended target, even in the case
     // of other proxies along the path.
-    destination_workload: Option<Workload>,
+    pub destination_workload: Option<Workload>,
     // The identity we will assert for the next hop; this may not be the same as destination_workload
     // in the case of proxies along the path.
-    expected_identity: Option<Identity>,
-    gateway: SocketAddr,
-    request_type: RequestType,
+    pub expected_identity: Option<Identity>,
+    pub gateway: SocketAddr,
+    pub request_type: RequestType,
 }
 
 #[derive(Debug)]
-enum Direction {
+pub enum Direction {
     Inbound,
     Outbound,
 }
 
 #[derive(PartialEq, Debug)]
-enum RequestType {
+pub enum RequestType {
     /// ToServerWaypoint refers to requests targeting a server waypoint proxy
     ToServerWaypoint,
     /// Direct requests are made directly to a intended backend pod
@@ -510,16 +584,19 @@ pub async fn connect_tls(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use bytes::Bytes;
+
     use crate::config::Config;
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::{identity, xds};
-    use bytes::Bytes;
-    use std::sync::Arc;
-    use std::time::Duration;
+
+    use super::*;
 
     async fn run_build_request(
         from: &str,

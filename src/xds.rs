@@ -42,7 +42,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 pub enum Error {
     #[error("gRPC error ({}): {}", .0.code(), .0.message())]
     GrpcStatus(#[from] tonic::Status),
-    #[error("gRPC connection error ({}): {}", .0.code(), .0.message())]
+    #[error("gRPC connection error ({}): {:?}", .0.code(), .0)]
     Connection(#[source] tonic::Status),
     /// Attempted to send on a MPSC channel which has been canceled
     #[error(transparent)]
