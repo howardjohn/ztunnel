@@ -98,6 +98,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
 }
 
 pub async fn add_nip_io_nameserver(mut cfg: config::Config) -> config::Config {
+    return cfg;
     // add nip.io as a nameserver so our test hostnames can resolve to reliable IPs
     let r = TokioAsyncResolver::new(
         ResolverConfig::default(),

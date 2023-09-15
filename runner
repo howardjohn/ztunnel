@@ -1,0 +1,8 @@
+#!/bin/bash
+unshare -rnm sh -c '
+# TODO: problem is ip requires /var/run/netns which we lose access to
+ip link set dev lo up
+ip link
+ip addr
+$@
+' $0 $@
