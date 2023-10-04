@@ -428,6 +428,11 @@ impl Certs {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
         self.setup_ctx(&mut conn)?;
 
+        // TODO: this is hacky. We need to sniff first bytes to see if its H1 or H2 I guess...
+        if let Some(Identity::DNS(_)) = dest_id.get(0) {
+            conn.set_alpn_protos(Alpn::H1.encode())?;
+        }
+
         // client verifies SAN
         conn.set_verify_callback(Self::verify_mode(), Verifier::San(dest_id).callback());
 
@@ -587,12 +592,14 @@ impl SanChecker for x509::X509 {
 
 enum Alpn {
     H2,
+    H1,
 }
 
 impl Alpn {
     fn encode(&self) -> &[u8] {
         match self {
             Alpn::H2 => b"\x02h2",
+            Alpn::H1 => b"\x08http/1.1",
         }
     }
 }

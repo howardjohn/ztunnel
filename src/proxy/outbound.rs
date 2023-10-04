@@ -247,6 +247,7 @@ impl OutboundConnection {
                         }
                     }
                 }
+                // TODO: we need to do sniffing for HTTP vs HTTP2
                 let connector = cert
                     .connector(allowed_sans)?
                     .configure()
