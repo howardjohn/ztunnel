@@ -19,6 +19,7 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use boring::error::ErrorStack;
+use boring::ssl::SslStream;
 use drain::Watch;
 use hyper::{header, Request};
 
@@ -209,6 +210,42 @@ pub async fn copy_hbone(
     use tokio::io::AsyncWriteExt;
     let (mut ri, mut wi) = tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
     let (mut ro, mut wo) = stream.split();
+
+    let (mut sent, mut received): (u64, u64) = (0, 0);
+
+    let client_to_server = async {
+        let mut ri = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ri);
+        let res = tokio::io::copy_buf(&mut ri, &mut wo).await;
+        trace!(?res, "hbone -> tcp");
+        received = res?;
+        wo.shutdown().await
+    };
+
+    let server_to_client = async {
+        let mut ro = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ro);
+        let res = tokio::io::copy_buf(&mut ro, &mut wi).await;
+        trace!(?res, "tcp -> hbone");
+        sent = res?;
+        wi.shutdown().await
+    };
+
+    tokio::try_join!(client_to_server, server_to_client)?;
+
+    trace!(sent, recv = received, "copy hbone complete");
+    metrics
+        .as_ref()
+        .record(&transferred_bytes, (sent, received));
+    Ok(())
+}
+pub async fn copy_tls(
+    tcp: &mut TcpStream,
+    tls: &mut tokio_boring::SslStream<TcpStream>,
+    metrics: impl AsRef<Metrics>,
+    transferred_bytes: BytesTransferred<'_>,
+) -> Result<(), Error> {
+    use tokio::io::AsyncWriteExt;
+    let (mut ri, mut wi) = tokio::io::split(tls);
+    let (mut ro, mut wo) = tcp.split();
 
     let (mut sent, mut received): (u64, u64) = (0, 0);
 

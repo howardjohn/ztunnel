@@ -254,9 +254,9 @@ impl OutboundConnection {
                 let mut outbound = super::freebind_connect(local, req.gateway).await?;
                 outbound.set_nodelay(true)?;
                 let mut tls_stream = connect_tls_sni(connector, outbound, &req.upstream_sans[0],).await?;
-
+                info!("tls connection established, copy bidi...");
                 // Proxying data between downstream and upstream
-                tokio::io::copy_bidirectional(&mut stream, &mut tls_stream).await?;
+                proxy::copy_tls(&mut stream, &mut tls_stream, &self.pi.metrics, transferred_bytes).await?;
                 Ok(())
             },
             Protocol::HBONE => {
@@ -608,6 +608,7 @@ pub async fn connect_tls_sni(
 ) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {
     connector.set_verify_hostname(true);
     connector.set_use_server_name_indication(true);
+    info!("connecting to domain {domain}");
     tokio_boring::connect(connector, domain, stream).await
 }
 
