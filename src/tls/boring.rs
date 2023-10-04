@@ -48,6 +48,7 @@ use tokio::net::TcpStream;
 use tonic::body::BoxBody;
 use tower_hyper_http_body_compat::{HttpBody04ToHttpBody1, HttpBody1ToHttpBody04};
 use tracing::{error, info};
+use crate::proxy::Error::Tls;
 
 pub fn asn1_time_to_system_time(time: &Asn1TimeRef) -> SystemTime {
     let unix_time = Asn1Time::from_unix(0).unwrap().diff(time).unwrap();
@@ -549,7 +550,7 @@ pub fn extract_sans(cert: &x509::X509) -> Vec<Identity> {
     cert.subject_alt_names()
         .iter()
         .flat_map(|sans| sans.iter())
-        .filter_map(|s| s.uri())
+        .filter_map(|s| s.uri().or_else(||s.dnsname()))
         .map(Identity::from_str)
         .collect::<Result<Vec<_>, _>>()
         .unwrap_or_default()
@@ -569,11 +570,13 @@ impl SanChecker for x509::X509 {
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError> {
         let source_trust_domain = match identity {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
+            _ => return Err(TlsError::NonSpiffeId(identity.to_string())),
         };
         let sans = extract_sans(self);
         sans.iter()
             .find(|id| match id {
                 Identity::Spiffe { trust_domain, .. } => trust_domain == source_trust_domain,
+                _ => false,
             })
             .ok_or_else(|| {
                 TlsError::SanTrustDomainError(source_trust_domain.to_string(), sans.clone())
@@ -633,6 +636,8 @@ pub enum TlsError {
         "san verification error: remote did not present the expected trustdomain ({0}), got {1:?}"
     )]
     SanTrustDomainError(String, Vec<Identity>),
+    #[error("not a spiffe id")]
+    NonSpiffeId(String),
     #[error("failed getting ex data")]
     ExDataError,
     #[error("failed getting peer cert")]

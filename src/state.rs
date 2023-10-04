@@ -498,6 +498,12 @@ impl DemandProxyState {
         self.state.read().unwrap().workloads.find_uid(uid)
     }
 
+    pub async fn fetch_opaque_service(&self, network: &str, addr: SocketAddr) -> Option<Address> {
+        self.state.read().unwrap().find_address(&NetworkAddress{
+            network: network.to_string(),
+            address: addr.ip(),
+        })
+    }
     pub async fn fetch_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
         self.fetch_address(&network_addr(network, addr.ip())).await;
         self.state.read().unwrap().find_upstream(network, addr)
@@ -606,6 +612,7 @@ pub fn set_gateway_address(
                 SocketAddr::from((ip, hbone_port))
             }
             Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
+            Protocol::TLS => SocketAddr::from((workload_ip, us.port)),
         });
     }
     Ok(())

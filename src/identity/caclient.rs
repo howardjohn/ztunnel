@@ -188,7 +188,9 @@ pub mod mock {
                 trust_domain: td,
                 namespace: ns,
                 ..
-            } = id;
+            } = id else {
+                panic!("cannot happen");
+            };
             if td == "error" {
                 return Err(match ns.as_str() {
                     "forgotten" => Error::Forgotten,

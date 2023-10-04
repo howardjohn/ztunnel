@@ -18,7 +18,7 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use drain::Watch;
 use http_body_util::Empty;
 use hyper::header::FORWARDED;
@@ -37,6 +37,7 @@ use crate::state::service::ServiceDescription;
 use crate::state::set_gateway_address;
 use crate::state::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
+use crate::state::workload::address::Address;
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -224,6 +225,40 @@ impl OutboundConnection {
             .metrics
             .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
         match req.protocol {
+            Protocol::TLS => {
+                info!(
+                    "Proxying to {} using TCP via {} type {:?}",
+                    req.destination, req.gateway, req.request_type
+                );
+                let id = &req.source.identity();
+                let cert = self.pi.cert_manager.fetch_certificate(id).await?;
+                // Create a TCP connection to upstream
+                let local = if self.pi.cfg.enable_original_source.unwrap_or_default() {
+                    super::get_original_src_from_stream(&stream)
+                } else {
+                    None
+                };
+                let mut allowed_sans: Vec<Identity> = Vec::new();
+                for san in req.upstream_sans.iter() {
+                    match Identity::from_str(san) {
+                        Ok(ident) => allowed_sans.push(ident.clone()),
+                        Err(err) => {
+                            warn!("error parsing SAN {}: {}", san, err)
+                        }
+                    }
+                }
+                let connector = cert
+                    .connector(allowed_sans)?
+                    .configure()
+                    .expect("configure");
+                let mut outbound = super::freebind_connect(local, req.gateway).await?;
+                outbound.set_nodelay(true)?;
+                let mut tls_stream = connect_tls_sni(connector, outbound, &req.upstream_sans[0],).await?;
+
+                // Proxying data between downstream and upstream
+                tokio::io::copy_bidirectional(&mut stream, &mut tls_stream).await?;
+                Ok(())
+            },
             Protocol::HBONE => {
                 info!(
                     "proxy to {} using HBONE via {} type {:#?}",
@@ -367,6 +402,21 @@ impl OutboundConnection {
             .fetch_upstream(&source_workload.network, target)
             .await;
         if us.is_none() {
+            if let Some(Address::Service(addr)) = self.pi.state.fetch_opaque_service(&source_workload.network, target).await {
+                let ip = tokio::net::lookup_host(format!("{}:443", addr.hostname)).await?.next().unwrap();
+                return Ok(Request {
+                    protocol: Protocol::TLS,
+                    source: source_workload,
+                    destination: ip,
+                    destination_workload: None,
+                    destination_service: None,
+                    expected_identity: None,
+                    gateway: ip,
+                    direction: Direction::Outbound,
+                    request_type: RequestType::ToServerWaypoint,
+                    upstream_sans: addr.subject_alt_names,
+                });
+            }
             // For case no upstream found, passthrough it
             return Ok(Request {
                 protocol: Protocol::TCP,
@@ -550,6 +600,15 @@ pub async fn connect_tls(
     connector.set_verify_hostname(false);
     connector.set_use_server_name_indication(false);
     tokio_boring::connect(connector, "", stream).await
+}
+pub async fn connect_tls_sni(
+    mut connector: ConnectConfiguration,
+    stream: TcpStream,
+    domain: &str,
+) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {
+    connector.set_verify_hostname(true);
+    connector.set_use_server_name_indication(true);
+    tokio_boring::connect(connector, domain, stream).await
 }
 
 #[cfg(test)]

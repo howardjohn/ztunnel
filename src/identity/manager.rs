@@ -40,6 +40,7 @@ pub enum Identity {
         namespace: String,
         service_account: String,
     },
+    DNS(String)
 }
 
 impl EncodeLabelValue for Identity {
@@ -55,6 +56,7 @@ impl FromStr for Identity {
         const SERVICE_ACCOUNT: &str = "sa";
         const NAMESPACE: &str = "ns";
         if !s.starts_with(URI_PREFIX) {
+            return Ok(Identity::DNS(s.to_string()));
             return Err(Spiffe(s.to_string()));
         }
         let split: Vec<_> = s[URI_PREFIX.len()..].split('/').collect();
@@ -83,6 +85,7 @@ impl fmt::Display for Identity {
                 f,
                 "spiffe://{trust_domain}/ns/{namespace}/sa/{service_account}"
             ),
+            Identity::DNS(d) => write!(f, "{d}")
         }
     }
 }

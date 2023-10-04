@@ -87,6 +87,7 @@ impl Authorization {
             .as_ref()
             .map(|i| match i {
                 Identity::Spiffe { namespace, .. } => namespace.to_owned(), // may be more clear if we use to_owned() to denote change from borrowed to owned
+                _ => "".to_string(),
             })
             .unwrap_or_default();
         if self.rules.is_empty() {

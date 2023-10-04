@@ -42,6 +42,7 @@ pub enum Protocol {
     #[default]
     TCP,
     HBONE,
+    TLS,
 }
 
 impl TryFrom<Option<xds::istio::workload::TunnelProtocol>> for Protocol {
