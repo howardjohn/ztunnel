@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::tls;
+
 use std::str::Utf8Error;
 
 mod caclient;
@@ -22,6 +23,8 @@ pub mod manager;
 pub use manager::*;
 
 mod auth;
+mod kubecsrclient;
+
 pub use auth::*;
 
 pub mod mock {
@@ -47,4 +50,6 @@ pub enum Error {
     Spiffe(String),
     #[error("the identity is no longer needed")]
     Forgotten,
+    #[error("invalid CA address: {0}")]
+    InvalidUri(String),
 }

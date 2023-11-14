@@ -21,15 +21,18 @@ use std::sync::Arc;
 
 use crate::config::ProxyMode;
 use async_trait::async_trait;
+use hyper::http::uri::Scheme;
+use hyper::Uri;
 
+use crate::identity::kubecsrclient::CsrClient;
+use crate::tls;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
-
-use crate::tls;
+use tracing::debug;
 
 use super::CaClient;
-use super::Error::{self, Spiffe};
+use super::Error::{self, InvalidUri, Spiffe};
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
@@ -252,8 +255,10 @@ impl Worker {
                 // the worker.
                 res = requests.recv() => match res {
                     Some(Request::Fetch(id, pri)) => {
+                        debug!(%id, priority=?pri, "fetch request");
                         if !self.has_id(&id).await {
                             // Nobody interested in the Identity anymore, do nothing.
+                            debug!(%id, "identity no longer required");
                             continue 'main;
                         }
                         match processing.get(&id) {
@@ -270,9 +275,11 @@ impl Worker {
                         }
                     },
                     Some(Request::Forget(id)) => {
+                        debug!(%id, "forget request");
                         if self.has_id(&id).await {
                             // After the forget was queued, there was another request to start
                             // managing the Identity. Do nothing.
+                            debug!(%id, "identity no longer required");
                             continue 'main;
                         }
                         match processing.get(&id) {
@@ -297,6 +304,7 @@ impl Worker {
                     let (state, refresh_at) = match res {
                         Err(err) => {
                             let refresh_at = Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY;
+                            debug!(%id, %err, "certificate fetch failed");
                             (CertState::Unavailable(err), refresh_at)
                         },
                         Ok(certs) => {
@@ -315,6 +323,7 @@ impl Worker {
                                 // conversion here, so for now leaving the code as is.
                                 Instant::now()
                             };
+                            debug!(%id,  "certificate fetch success");
                             (CertState::Available(certs), refresh_at)
                         },
                     };
@@ -386,8 +395,18 @@ pub struct SecretManager {
 
 impl SecretManager {
     pub async fn new(cfg: crate::config::Config) -> Result<Self, Error> {
+        let ca_address = cfg.ca_address.unwrap();
+        let uri = Uri::try_from(ca_address.clone()).map_err(|_| InvalidUri(ca_address.clone()))?;
+        if uri.scheme() == Some(&Scheme::from_str("kubernetes").unwrap()) {
+            let caclient = CsrClient::new(
+                uri.host().unwrap().to_string() + uri.path(),
+                cfg.proxy_mode == ProxyMode::Shared,
+            )
+            .await?;
+            return Ok(Self::new_with_client(caclient));
+        }
         let caclient = CaClient::new(
-            cfg.ca_address.unwrap(),
+            ca_address,
             Box::new(tls::FileClientCertProviderImpl::RootCert(
                 cfg.ca_root_cert.clone(),
             )),

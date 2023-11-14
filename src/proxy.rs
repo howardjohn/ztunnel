@@ -313,6 +313,7 @@ pub(super) fn maybe_set_transparent(
         }
         Some(false) => {
             // Explicitly disabled, don't even attempt to set it.
+            socket::set_transparent(listener)?;
             false
         }
         None => {

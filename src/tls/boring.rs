@@ -1,7 +1,11 @@
+use secrecy::ExposeSecret;
 use std::fmt::Debug;
+use std::fs;
 use std::future::Future;
 use std::net::IpAddr;
+use std::path::Path;
 use std::pin::Pin;
+use tower::Service;
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -40,12 +44,15 @@ use hyper::{Request, Response, Uri};
 use hyper_boring::HttpsConnector;
 use hyper_util::client::connect::HttpConnector;
 use itertools::Itertools;
+use kube::{client::ConfigExt, Client};
 use rand::RngCore;
 use std::str::FromStr;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tonic::body::BoxBody;
+
+use tower::{service_fn, ServiceBuilder};
 use tower_hyper_http_body_compat::{HttpBody04ToHttpBody1, HttpBody1ToHttpBody04};
 use tracing::{error, info};
 
@@ -270,6 +277,134 @@ impl ClientCertProvider for FileClientCertProviderImpl {
     }
 }
 
+fn identity_pem(
+    ai: &kube::config::AuthInfo,
+) -> anyhow::Result<(x509::X509, pkey::PKey<pkey::Private>)> {
+    fn load_from_file<P: AsRef<Path>>(file: &P) -> Result<Vec<u8>, kube::config::LoadDataError> {
+        fs::read(file)
+            .map_err(|source| kube::config::LoadDataError::ReadFile(source, file.as_ref().into()))
+    }
+    fn load_from_base64(value: &str) -> Result<Vec<u8>, kube::config::LoadDataError> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .map_err(kube::config::LoadDataError::DecodeBase64)
+    }
+    fn load_from_base64_or_file<P: AsRef<Path>>(
+        value: &Option<&str>,
+        file: &Option<P>,
+    ) -> Result<Vec<u8>, kube::config::LoadDataError> {
+        let data = value
+            .map(load_from_base64)
+            .or_else(|| file.as_ref().map(load_from_file))
+            .unwrap_or_else(|| Err(kube::config::LoadDataError::NoBase64DataOrFile))?;
+        Ok(data)
+    }
+    let client_cert = load_from_base64_or_file(
+        &ai.client_certificate_data.as_deref(),
+        &ai.client_certificate,
+    )
+    .map_err(kube::config::KubeconfigError::LoadClientCertificate)?;
+    let client_key = load_from_base64_or_file(
+        &ai.client_key_data
+            .as_ref()
+            .map(|secret| secret.expose_secret().as_str()),
+        &ai.client_key,
+    )
+    .map_err(kube::config::KubeconfigError::LoadClientKey)?;
+    let cert = x509::X509::from_pem(&client_cert)?;
+    let pkey = pkey::PKey::private_key_from_pem(&client_key)?;
+    Ok((cert, pkey))
+}
+
+pub async fn create_k8s_client() -> Result<kube::Client, anyhow::Error> {
+    let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
+    conn.set_verify(ssl::SslVerifyMode::PEER);
+    conn.set_alpn_protos(Alpn::H2.encode())?;
+    conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
+    conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+    let config = kube::Config::infer().await?;
+    info!("{config:?}");
+    // TODO: exec_identity_pem
+    if let Ok((cert, key)) = identity_pem(&config.auth_info) {
+        conn.set_private_key(&key)?;
+        conn.set_certificate(&cert)?;
+        conn.check_private_key()?;
+    }
+    let cert_store = conn.cert_store_mut();
+    // Already configured to use system root certs if there are none
+    if let Some(ref roots) = config.root_cert {
+        for root in roots {
+            let x509 = x509::X509::from_der(root).map_err(Error::InvalidRootCert)?;
+            cert_store.add_cert(x509).map_err(Error::InvalidRootCert)?;
+        }
+    }
+    // TODO: use tls_server_name
+
+    let mut http: HttpConnector = HttpConnector::new();
+    // Set keepalives to match istio's Envoy bootstrap configuration:
+    // https://github.com/istio/istio/blob/a29d5c9c27d80bff31f218936f5a96759d8911c8/tools/packaging/common/envoy_bootstrap.json#L322C14-L322C28
+    //
+    // keepalive_interval and keepalive_retries match the linux default per Envoy docs:
+    // https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/core/v3/address.proto#config-core-v3-tcpkeepalive
+    http.set_keepalive(Some(Duration::from_secs(300)));
+    http.set_keepalive_interval(Some(Duration::from_secs(75)));
+    http.set_keepalive_retries(Some(9));
+    http.enforce_http(false);
+    let https: HttpsConnector<HttpConnector> =
+        hyper_boring::HttpsConnector::with_connector(http, conn)?;
+
+    // Configure hyper's client to be h2 only and build with the
+    // correct https connector.
+    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_timeout(Duration::from_secs(10))
+        .timer(crate::hyper_util::TokioTimer)
+        .build(https);
+
+    let service = ServiceBuilder::new()
+        .layer(config.base_uri_layer())
+        .option_layer(config.auth_layer()?)
+        .service(service_fn(move |req: Request<hyper_14::Body>| {
+            let mut client = client.clone();
+            async move {
+                let req = req.map(HttpBody04ToHttpBody1::new);
+                client
+                    .call(req)
+                    .await
+                    .map(|res| res.map(HttpBody1ToHttpBody04::new))
+            }
+        }));
+    // let service = Connector(service);
+    let client = Client::new(service, config.default_namespace);
+    Ok(client)
+}
+
+/*pub struct Connector<T> {
+    inner: T
+}
+
+impl<T> tower::Service<Request<hyper_14::Body>> for Connector<T> where
+    T: tower::Service<Request<HttpBody04ToHttpBody1<hyper_14::Body>>>
+{
+    type Response = Response<HttpBody1ToHttpBody04<Incoming>>;
+    type Error = hyper_util::client::legacy::Error;
+    // type Error = hyper::Error;
+    type Future = Pin<Box<dyn Future<Output=Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Ok(()).into()
+    }
+
+    fn call(&mut self, req: Request<hyper_14::Body>) -> Self::Future {
+        let mut req = req.map(HttpBody04ToHttpBody1::new);
+        Box::pin(async move {
+            let res = self.inner.call(req).await?;
+            Ok(res.map(HttpBody1ToHttpBody04::new))
+        })
+    }
+}
+*/
 /// grpc_connector provides a client TLS channel for gRPC requests.
 pub fn grpc_tls_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
     let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;

@@ -615,6 +615,7 @@ impl AdsClient {
         info!(
             type_url = type_url, // this is a borrow, it's OK
             size = response.resources.len(),
+            removed = response.removed_resources.len(),
             "received response"
         );
         let handler_response: Result<(), Vec<RejectedConfig>> =
