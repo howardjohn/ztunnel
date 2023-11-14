@@ -83,3 +83,7 @@ globally applying arguments to cargo. In this case, it is probably easier to rem
 default = []
 # ...
 ```
+
+## CSR
+
+CA_ROOT_CA=tls.crt CA_ADDRESS="kubernetes://clusterissuers.cert-manager.io/istio-ca" RUST_LOG=debug XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml cargo run

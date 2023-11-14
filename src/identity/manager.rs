@@ -400,6 +400,7 @@ impl SecretManager {
         if uri.scheme() == Some(&Scheme::from_str("kubernetes").unwrap()) {
             let caclient = CsrClient::new(
                 uri.host().unwrap().to_string() + uri.path(),
+                cfg.ca_root_cert,
                 cfg.proxy_mode == ProxyMode::Shared,
             )
             .await?;

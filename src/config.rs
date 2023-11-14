@@ -74,6 +74,16 @@ pub enum RootCert {
     Default,
 }
 
+impl RootCert {
+    pub async fn read(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(match self {
+            RootCert::File(path) => tokio::fs::read(path).await?,
+            RootCert::Static(data) => data.clone().into(),
+            RootCert::Default => anyhow::bail!("cannot read default CA"),
+        })
+    }
+}
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum ConfigSource {
     File(PathBuf),

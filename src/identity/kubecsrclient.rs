@@ -27,10 +27,12 @@ use kube::{
     Client,
 };
 
-use tracing::{info, instrument, warn};
+use tracing::{error, info, instrument, warn};
+use crate::config::RootCert;
 
 pub struct CsrClient {
     client: Client,
+    root_cert: Vec<u8>,
     signer: String,
     pub enable_impersonated_identity: bool,
 }
@@ -41,12 +43,14 @@ const TTL: i32 = 86400;
 impl CsrClient {
     pub async fn new(
         signer: String,
+        root_cert: RootCert,
         enable_impersonated_identity: bool,
     ) -> Result<CsrClient, Error> {
         // TODO: not default, handle errors
         let client = tls::create_k8s_client().await.unwrap();
         Ok(CsrClient {
             client,
+            root_cert: root_cert.read().await.map_err( |_| Error::RootCert)?,
             signer,
             enable_impersonated_identity,
         })
@@ -95,19 +99,13 @@ impl CsrClient {
                 let final_certs = Self::check_signed_cert(&csr, &csr_name).await;
                 match final_certs {
                     Ok(cert_chain) => {
-                        let cert_chain_vec = cert_chain.0;
-                        let final_cert_chain = [std::str::from_utf8(&cert_chain_vec).unwrap()];
-                        let leaf = final_cert_chain[0].as_bytes();
-                        let ca_cert_bundle = if final_cert_chain.len() > 1 {
-                            final_cert_chain[1..]
-                                .iter()
-                                .map(|final_cert_chain| final_cert_chain.as_bytes())
-                                .collect()
-                        } else {
-                            warn!("no chain certs for: {}", id);
-                            vec![]
-                        };
-                        let res_certs = tls::cert_from(&pkey, leaf, ca_cert_bundle);
+                        // let cert_chain_vec = cert_chain.0;
+                        // let final_cert_chain = [std::str::from_utf8(&cert_chain_vec).unwrap()];
+                        // let leaf = final_cert_chain[0].as_bytes();
+                        let leaf = cert_chain.0;
+                        let res_certs = tls::cert_from(&pkey, &leaf, vec![&self.root_cert]);
+                        error!("{res_certs:?}");
+                        error!("chain={:?}", vec![&self.root_cert]);
                         res_certs
                             .verify_san(&[id.clone()])
                             .map_err(|_| Error::SanError(id.clone()))?;
