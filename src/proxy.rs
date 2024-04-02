@@ -423,6 +423,12 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
         .map_or(None, |sa| Some(socket::to_canonical(sa).ip()))
 }
 
+pub fn get_original_src_from_stream2(stream: &TcpStream) -> Option<SocketAddr> {
+    stream
+        .peer_addr()
+        .map_or(None, |sa| Some(socket::to_canonical(sa)))
+}
+
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn freebind_connect(
@@ -472,6 +478,62 @@ pub async fn freebind_connect(
                     }
                 };
                 trace!(%src, dest=%addr, "connect with source IP");
+                Ok(socket.connect(addr).await?)
+            }
+        }
+    }
+    // Wrap the entire connect function in a timeout
+    timeout(CONNECTION_TIMEOUT, connect(local, addr, socket_factory))
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?
+}
+
+pub async fn freebind_connect2(
+    local: Option<SocketAddr>,
+    addr: SocketAddr,
+    socket_factory: &(dyn SocketFactory + Send + Sync),
+) -> io::Result<TcpStream> {
+    async fn connect(
+        local: Option<SocketAddr>,
+        addr: SocketAddr,
+        socket_factory: &(dyn SocketFactory + Send + Sync),
+    ) -> io::Result<TcpStream> {
+        let create_socket = |is_ipv4: bool| {
+            if is_ipv4 {
+                socket_factory.new_tcp_v4()
+            } else {
+                socket_factory.new_tcp_v6()
+            }
+        };
+
+        // we don't need original src with inpod outbound mode.
+        // we do need it in inbound and inbound passthrough TODO: refactor so this is derived from config
+        // local = None; // commented out for now as we only want to disable this in inpod + outbound mode
+
+        match local {
+            None => {
+                let socket = create_socket(addr.is_ipv4())?;
+                error!(dest=%addr, "no local address, connect directly");
+                Ok(socket.connect(addr).await?)
+            }
+            // TODO: Need figure out how to handle case of loadbalancing to itself.
+            //       We use ztunnel addr instead, otherwise app side will be confused.
+            Some(src) if src.ip() == socket::to_canonical(addr).ip() => {
+                let socket = create_socket(addr.is_ipv4())?;
+                error!(%src, dest=%addr, "dest and source are the same, connect directly");
+                Ok(socket.connect(addr).await?)
+            }
+            Some(src) => {
+                let socket = create_socket(src.is_ipv4())?;
+                match socket::set_freebind_and_transparent(&socket) {
+                    Err(err) => warn!("failed to set freebind: {:?}", err),
+                    _ => {
+                        if let Err(err) = socket.bind(src) {
+                            warn!("failed to bind local addr: {:?}", err)
+                        }
+                    }
+                };
+                error!(%src, dest=%addr, "connect with source IP");
                 Ok(socket.connect(addr).await?)
             }
         }

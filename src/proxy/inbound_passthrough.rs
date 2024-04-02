@@ -138,7 +138,7 @@ impl InboundPassthrough {
             // Spoofing the source IP only works when the destination or the source are on our node.
             // In this case, the source and the destination might both be remote, so we need to disable it.
             oc.pi.cfg.enable_original_source = Some(false);
-            return oc.proxy_to(inbound, source.ip(), orig, false).await;
+            return oc.proxy_to(inbound, source, orig, false).await;
         }
 
         // We enforce RBAC only for non-hairpin cases. This is because we may not be able to properly
@@ -175,7 +175,7 @@ impl InboundPassthrough {
                 return Ok(());
             }
         };
-        let source_ip = super::get_original_src_from_stream(&inbound);
+        let source_ip = super::get_original_src_from_stream2(&inbound);
         let orig_src = pi
             .cfg
             .enable_original_source
@@ -185,7 +185,7 @@ impl InboundPassthrough {
         trace!(%source, destination=%orig, component="inbound plaintext", "connect to {orig:?} from {orig_src:?}");
 
         let mut outbound =
-            super::freebind_connect(orig_src, orig, pi.socket_factory.as_ref()).await?;
+            super::freebind_connect2(orig_src, orig, pi.socket_factory.as_ref()).await?;
 
         trace!(%source, destination=%orig, component="inbound plaintext", "connected");
 
@@ -196,7 +196,7 @@ impl InboundPassthrough {
                 // rather than HBONE, which can be tunneled across networks through gateways.
                 // by definition, without the gateway our source must be on our network.
                 network: pi.cfg.network.clone(),
-                address: source_ip,
+                address: source_ip.ip(),
             };
             pi.state.fetch_workload(&network_addr_srcip).await
         } else {
