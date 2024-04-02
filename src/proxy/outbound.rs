@@ -180,7 +180,7 @@ impl OutboundConnection {
             // However, we would then get inconsistent behavior where only node-local pods have RBAC enforced.
             info!("proxying to {} using node local fast path", req.destination);
             let origin_src = if self.pi.cfg.enable_original_source.unwrap_or_default() {
-                super::get_original_src_from_stream(&stream)
+                super::get_original_src_from_stream2(&stream)
             } else {
                 None
             };

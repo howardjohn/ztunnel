@@ -97,6 +97,7 @@ impl Inbound {
             let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
             let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
             let src_ip = to_canonical(raw_socket.peer_addr().unwrap()).ip();
+            let src_addr = to_canonical(raw_socket.peer_addr().unwrap());
             let pi = self.pi.clone();
             let connection_manager = self.pi.connection_manager.clone();
             let drain = sub_drain.clone();
@@ -120,6 +121,7 @@ impl Inbound {
                             Self::serve_connect(
                                 pi.clone(),
                                 conn.clone(),
+                                src_addr,
                                 enable_original_source.unwrap_or_default(),
                                 req,
                                 connection_manager.clone(),
@@ -149,7 +151,7 @@ impl Inbound {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_inbound(
         request_type: InboundConnect,
-        orig_src: Option<IpAddr>,
+        orig_src: Option<SocketAddr>,
         addr: SocketAddr,
         metrics: Arc<Metrics>,
         connection_metrics: ConnectionOpen,
@@ -159,7 +161,7 @@ impl Inbound {
         rbac_ctx: crate::state::ProxyRbacContext,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
-        let stream = super::freebind_connect(orig_src, addr, socket_factory).await;
+        let stream = super::freebind_connect2(orig_src, addr, socket_factory).await;
         match stream {
             Err(err) => {
                 warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
@@ -271,6 +273,7 @@ impl Inbound {
     async fn serve_connect(
         pi: ProxyInputs,
         conn: Connection,
+        src_addr: SocketAddr,
         enable_original_source: bool,
         req: Request<Incoming>,
         connection_manager: ConnectionManager,
@@ -301,7 +304,7 @@ impl Inbound {
                                 .unwrap());
                         }
                     };
-
+                
                 // Orig has 15008, swap with the real port
                 let conn = Connection {
                     dst: upstream_addr,
@@ -398,7 +401,7 @@ impl Inbound {
                 };
                 let status_code = match Self::handle_inbound(
                     Hbone(req),
-                    enable_original_source.then_some(source_ip),
+                    enable_original_source.then_some(src_addr),
                     upstream_addr,
                     pi.metrics,
                     connection_metrics,
