@@ -68,7 +68,7 @@ libc = "0.2"
 log = "0.4"
 nix = { version = "0.27", features = ["socket", "sched", "uio", "fs", "ioctl", "user"] }
 once_cell = "1.19"
-pprof = { version = "0.13", features = ["protobuf", "protobuf-codec", "criterion"] }
+pprof = { version = "0.13", features = ["prost-codec", "flamegraph", "protobuf", "criterion"] }
 priority-queue = "1.4"
 prometheus-client = { version = "0.22" }
 prometheus-parse = "0.2"
@@ -85,7 +85,7 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 socket2 = { version = "0.5", features = ["all"] }
 textnonce = { version = "1.0" }
-thiserror = "1.0"
+thiserror = "1.0.58"
 tls-listener = { version = "0.9" }
 tokio = { "version" = "1.0", features = ["full", "test-util"] }
 tokio-rustls = "0.25"
@@ -97,6 +97,8 @@ tracing = { version = "0.1"}
 tracing-subscriber = { version = "0.3", features = ["registry", "env-filter", "json"] }
 url = "2.2"
 x509-parser = { version = "0.15", default-features = false }
+heappy = { git = "https://github.com/mkmik/heappy", version = "0.1.0", features = ["enable_heap_profiler", "measure_free"] }
+tikv-jemallocator = "0.5.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"

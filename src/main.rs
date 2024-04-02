@@ -15,10 +15,11 @@
 extern crate core;
 #[cfg(feature = "gperftools")]
 extern crate gperftools;
-
 use tracing::info;
 use ztunnel::*;
+use tikv_jemallocator::Jemalloc;
 
+static GLOBAL: Jemalloc = Jemalloc;
 // #[global_allocator]
 // static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 

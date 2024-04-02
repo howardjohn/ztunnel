@@ -132,6 +132,7 @@ impl Service {
         self.s.spawn(|state, req| async move {
             match req.uri().path() {
                 "/debug/pprof/profile" => Ok(handle_pprof(req).await),
+                "/debug/pprof/heap" => Ok(handle_heappy(req).await),
                 "/debug/gprof/profile" => Ok(handle_gprof(req).await),
                 "/debug/gprof/heap" => Ok(handle_gprof_heap(req).await),
                 "/quitquitquit" => Ok(handle_server_shutdown(
@@ -271,7 +272,8 @@ async fn handle_pprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
         Ok(report) => {
             let profile = report.pprof().unwrap();
 
-            let body = profile.write_to_bytes().unwrap();
+            let body = profile.encode_to_vec();
+            // let body = profile.write_to_bytes().unwrap();
 
             Response::builder()
                 .status(hyper::StatusCode::OK)
@@ -283,6 +285,22 @@ async fn handle_pprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
             format!("failed to build profile: {err}\n"),
         ),
     }
+}
+
+async fn handle_heappy(_req: Request<Incoming>) -> Response<Full<Bytes>> {
+    let report = tokio::task::spawn_blocking(|| {
+        let heap_profiler_guard = heappy::HeapProfilerGuard::new(1).unwrap();
+
+        std::thread::sleep(Duration::from_secs(10));
+        heap_profiler_guard.report()
+    }).await.unwrap();
+    let profile = report.pprof();
+    let body = profile.encode_to_vec();
+    // let body = profile.write_to_bytes().unwrap();
+    Response::builder()
+        .status(hyper::StatusCode::OK)
+        .body(body.into())
+        .unwrap()
 }
 
 async fn handle_server_shutdown(
