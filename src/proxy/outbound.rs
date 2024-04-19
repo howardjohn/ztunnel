@@ -359,7 +359,7 @@ impl OutboundConnection {
 
             Ok(request_sender)
         };
-        let mut connection = self.pi.pool.connect(pool_key.clone(), connect).await?;
+        let connection = self.pi.pool.connect(pool_key.clone(), connect).await?;
 
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());

@@ -238,6 +238,9 @@ pub enum Error {
     #[error("pool is already connecting")]
     PoolAlreadyConnecting,
 
+    #[error("pool doesn't have any connections")]
+    PoolHasNoConnections,
+
     #[error("pool: {0}")]
     Pool(#[from] hyper_util::client::legacy::pool::Error),
 
