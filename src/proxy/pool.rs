@@ -21,10 +21,12 @@ use hyper::body::Incoming;
 use hyper::client::conn::http2;
 use hyper::http::{Request, Response};
 
+use hyper::upgrade::Upgraded;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::error;
@@ -37,22 +39,23 @@ pub struct Pool {
     inner: Arc<Mutex<PoolInner>>,
 }
 
+#[derive(Clone, Debug)]
 struct Pooled {
     value: Client,
-    active: usize,
+    active: Arc<AtomicU64>,
     idle_at: Option<Instant>,
 }
 
 const POOL_TIMEOUT: Duration = Duration::from_secs(5); // TODO
-const POOL_REQUESTS_PER_CONN: usize = 5; // TODO
+const POOL_REQUESTS_PER_CONN: u64 = 5; // TODO
 
 impl Pooled {
     fn is_usable(&self) -> bool {
-        self.active < POOL_REQUESTS_PER_CONN
+        self.active.load(Ordering::SeqCst) < POOL_REQUESTS_PER_CONN
     }
     fn is_idle(&self) -> bool {
         if let Some(idle) = self.idle_at {
-            assert_eq!(self.active, 0);
+            assert_eq!(self.active.load(Ordering::SeqCst), 0);
             Instant::now().saturating_duration_since(idle) > POOL_TIMEOUT
         } else {
             false
@@ -61,9 +64,9 @@ impl Pooled {
 }
 
 struct PoolInner {
-    connecting: HashMap<Key, usize>,
+    connecting: HashMap<Key, u64>,
     pooled: HashMap<Key, Vec<Pooled>>,
-    waiters: HashMap<Key, VecDeque<oneshot::Sender<Client>>>,
+    waiters: HashMap<Key, VecDeque<oneshot::Sender<Pooled>>>,
 }
 
 impl Pool {
@@ -80,7 +83,7 @@ impl Pool {
     // checkout will checkout an existing connection. If one is available, it will be used right away.
     // If not, and a new connection should be established, None will be returned
     // If not, we will wait for another connection to be established by someone else, then return it.
-    pub async fn checkout(&self, key: &Key) -> Option<Client> {
+    pub async fn checkout(&self, key: &Key) -> Option<Pooled> {
         error!("checkout");
         let maybe_rx = {
             let mut inner = self.inner.lock().unwrap();
@@ -89,8 +92,8 @@ impl Pool {
                 conns.retain(|c| !c.is_idle());
                 // Find the first usable one, if any
                 conns.iter_mut().find(|c| c.is_usable()).map(|v| {
-                    v.active += 1;
-                    v.value.clone()
+                    v.active.fetch_add(1, Ordering::SeqCst);
+                    v.clone()
                 })
             });
             error!("checkout {resp:?}");
@@ -107,7 +110,7 @@ impl Pool {
                 // There is already some establishing connections...
                 let waiters = inner.waiters.get(key).map(|w| w.len()).unwrap_or_default();
                 error!("checkout connecting={num_connecting:?} waiters={waiters}");
-                if waiters < num_connecting * POOL_REQUESTS_PER_CONN {
+                if (waiters as u64) < num_connecting * POOL_REQUESTS_PER_CONN {
                     // the establishing connections can each serve POOL_REQUESTS_PER_CONN.
                     // We have 'waiter' number of clients waiting for a connection
                     // If the in-progress connections can fit us, become a waiter.
@@ -139,7 +142,6 @@ impl Pool {
     }
 
     // connecting marks a key as currently connecting.
-    // Err(Error::PoolAlreadyConnecting) is returned if we should instead use another connection that is being started
     pub fn connecting(&self, key: &Key) {
         let mut inner = self.inner.lock().unwrap();
         inner
@@ -150,27 +152,30 @@ impl Pool {
     }
 
     // add_to_pool adds a connection to the pool for the key
-    pub fn add_to_pool(&self, key: &Key, value: Client) -> Client {
+    pub fn add_to_pool(&self, key: &Key, value: Client) -> Pooled {
         let mut inner = self.inner.lock().unwrap();
-        let c = inner.connecting.get_mut(key).expect("there must be a connecting");
+        let c = inner
+            .connecting
+            .get_mut(key)
+            .expect("there must be a connecting");
         *c -= 1;
-        let to_insert = value.clone();
         // Insert our new entry
         let mut entry = Pooled {
-            value: to_insert,
-            active: 1,
+            value: value,
+            active: Arc::new(AtomicU64::new(1)),
             idle_at: None,
         };
+        let to_insert = entry.clone();
         if let Some(waiters) = inner.waiters.remove(key) {
             let mut push_back = VecDeque::new();
             for waiter in waiters {
-                if entry.active >= POOL_REQUESTS_PER_CONN {
+                if entry.active.load(Ordering::SeqCst) >= POOL_REQUESTS_PER_CONN {
                     push_back.push_back(waiter);
                 } else {
                     // For each waiter, mark its in used
-                    entry.active += 1;
+                    entry.active.fetch_add(1, Ordering::SeqCst);
                     // and give them a handle to the connection
-                    waiter.send(value.clone()); // TODO handle error
+                    waiter.send(entry.clone()); // TODO handle error
                 }
             }
             if !push_back.is_empty() {
@@ -178,9 +183,9 @@ impl Pool {
             }
         }
         // Push the new entry, with active count
-        inner.pooled.entry(key.clone()).or_default().push(entry);
+        inner.pooled.entry(key.clone()).or_default().push(to_insert);
         // Give the original value back
-        value
+        entry
     }
 }
 
@@ -221,17 +226,53 @@ impl Client {
     }
 }
 
+pub struct Stream {
+    stream: Upgraded,
+    counter: Arc<AtomicU64>,
+}
+
+impl Stream {
+    pub fn as_mut(&mut self) -> &mut Upgraded {
+        &mut self.stream
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Pool {
-    pub async fn connect<F>(&self, key: Key, connect: F) -> Result<Client, Error>
+    pub async fn connect<F>(
+        &self,
+        key: Key,
+        connect: F,
+        req: Request<Empty<Bytes>>,
+    ) -> Result<Stream, Error>
     where
         F: Future<Output = Result<http2::SendRequest<Empty<Bytes>>, Error>>,
     {
-        if let Some(reused_connection) = self.checkout(&key).await {
-            return Ok(reused_connection);
+        let mut connection = {
+            if let Some(reused_connection) = self.checkout(&key).await {
+                reused_connection
+            } else {
+                self.connecting(&key);
+                let new_connection = Client(connect.await?);
+                self.add_to_pool(&key, new_connection)
+            }
+        };
+
+        let response = connection.value.0.send_request(req).await?;
+        let code = response.status();
+        if code != 200 {
+            return Err(Error::HttpStatus(code));
         }
-        self.connecting(&key);
-        let new_connection = Client(connect.await?);
-        Ok(self.add_to_pool(&key, new_connection))
+        let upgraded = hyper::upgrade::on(response).await?;
+        Ok(Stream {
+            stream: upgraded,
+            counter: connection.active,
+        })
     }
 }
 #[cfg(test)]

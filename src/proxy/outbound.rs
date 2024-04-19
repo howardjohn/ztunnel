@@ -359,7 +359,6 @@ impl OutboundConnection {
 
             Ok(request_sender)
         };
-        let connection = self.pi.pool.connect(pool_key.clone(), connect).await?;
 
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
@@ -374,22 +373,11 @@ impl OutboundConnection {
             .body(Empty::<Bytes>::new())
             .expect("builder with known status code should not fail");
 
-        debug!("outbound - connection send START");
-        // There are scenarios (upstream hangup, etc) where this "send" will simply get stuck.
-        // As in, stream processing deadlocks, and `send_request` never resolves to anything.
-        // Probably related to https://github.com/hyperium/hyper/issues/3623
-        let response = connection.send_request(request).await?;
-        debug!("outbound - connection send END");
-
-        let code = response.status();
-        if code != 200 {
-            return Err(Error::HttpStatus(code));
-        }
-        let upgraded = hyper::upgrade::on(response).await?;
+        let mut connection = self.pi.pool.connect(pool_key.clone(), connect, request).await?;
 
         socket::copy_bidirectional(
             stream,
-            &mut ::hyper_util::rt::TokioIo::new(upgraded),
+            &mut ::hyper_util::rt::TokioIo::new(connection.as_mut()),
             connection_stats,
         )
         .instrument(trace_span!("hbone client"))
