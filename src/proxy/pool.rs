@@ -23,6 +23,7 @@ use hyper::http::{Request, Response};
 
 use hyper::upgrade::Upgraded;
 use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
 use std::future::Future;
 use std::net::IpAddr;
 use std::net::SocketAddr;
@@ -43,10 +44,11 @@ pub struct Pool {
 struct Pooled {
     value: Client,
     active: Arc<AtomicU64>,
-    idle_at: Option<Instant>,
+    last_use: Idle,
 }
 
 const POOL_TIMEOUT: Duration = Duration::from_secs(5); // TODO
+const POOL_INTERVAL: Duration = Duration::from_secs(1); // TODO
 const POOL_REQUESTS_PER_CONN: u64 = 5; // TODO
 
 impl Pooled {
@@ -54,12 +56,10 @@ impl Pooled {
         self.active.load(Ordering::SeqCst) < POOL_REQUESTS_PER_CONN
     }
     fn is_idle(&self) -> bool {
-        if let Some(idle) = self.idle_at {
-            assert_eq!(self.active.load(Ordering::SeqCst), 0);
-            Instant::now().saturating_duration_since(idle) > POOL_TIMEOUT
-        } else {
-            false
+        if self.active.load(Ordering::SeqCst) > 0 {
+            return false;
         }
+        self.last_use.is_idle()
     }
 }
 
@@ -67,18 +67,56 @@ struct PoolInner {
     connecting: HashMap<Key, u64>,
     pooled: HashMap<Key, Vec<Pooled>>,
     waiters: HashMap<Key, VecDeque<oneshot::Sender<Pooled>>>,
+    // When dropped, our idle task will close
+    idle_interval_ref: oneshot::Sender<Infallible>,
 }
 
 impl Pool {
     pub fn new() -> Pool {
+        let (tx, mut rx) = oneshot::channel();
+        let inner = Arc::new(Mutex::new(PoolInner {
+            connecting: HashMap::new(),
+            pooled: HashMap::new(),
+            waiters: HashMap::new(),
+            idle_interval_ref: tx,
+        }));
+        let timer_inner = inner.clone();
+        tokio::task::spawn(async move {
+            let mut ticker = tokio::time::interval(POOL_INTERVAL);
+            loop {
+                tokio::select!{
+                    biased;
+                    _ = &mut rx => {
+                        error!("dropping idle checker");
+                        return;
+                    }
+                    _ = ticker.tick() => {
+                        error!("idle checker...");
+                        let mut inner = timer_inner.lock().unwrap();
+                        inner.pooled.retain(|k, mut v| {
+                            v.retain(|c|{
+
+                                error!("{} {}", c.active.load(Ordering::SeqCst), c.last_use.is_idle());
+                                !c.is_idle()
+                            });
+                            if v.is_empty() {
+                                error!("dropping {k:?} {v:?}");
+                                false
+                            } else {
+                                error!("not dropping {k:?}");
+                                true
+                            }
+                        })
+                    }
+                }
+            }
+        });
         Self {
-            inner: Arc::new(Mutex::new(PoolInner {
-                connecting: HashMap::new(),
-                pooled: HashMap::new(),
-                waiters: HashMap::new(),
-            })),
+            inner,
         }
     }
+
+
 
     // checkout will checkout an existing connection. If one is available, it will be used right away.
     // If not, and a new connection should be established, None will be returned
@@ -163,7 +201,7 @@ impl Pool {
         let mut entry = Pooled {
             value: value,
             active: Arc::new(AtomicU64::new(1)),
-            idle_at: None,
+            last_use: Idle::new(),
         };
         let to_insert = entry.clone();
         if let Some(waiters) = inner.waiters.remove(key) {
@@ -226,9 +264,29 @@ impl Client {
     }
 }
 
+#[derive(Clone, Debug)]
+struct Idle {
+    inner: Arc<Mutex<Instant>>,
+}
+
+impl Idle {
+    pub fn new() -> Idle {
+        Idle{inner:Arc::new(Mutex::new(Instant::now()))}
+    }
+    pub fn reset(&mut self) {
+        let mut i = self.inner.lock().unwrap();
+        *i = Instant::now()
+    }
+    pub fn is_idle(&self) -> bool {
+        let last_use = self.inner.lock().unwrap();
+        Instant::now().saturating_duration_since(*last_use) > POOL_TIMEOUT
+    }
+}
+
 pub struct Stream {
     stream: Upgraded,
     counter: Arc<AtomicU64>,
+    last_use: Idle,
 }
 
 impl Stream {
@@ -239,6 +297,7 @@ impl Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
+        error!("drop stream, had {} active", self.counter.load(Ordering::SeqCst));
         self.counter.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -263,15 +322,24 @@ impl Pool {
             }
         };
 
-        let response = connection.value.0.send_request(req).await?;
+        let response = match connection.value.0.send_request(req).await{
+            Ok(r) => r,
+            Err(e) => {
+                connection.active.fetch_sub(1, Ordering::SeqCst);
+                return Err(e.into())
+            }
+        };
         let code = response.status();
         if code != 200 {
+            connection.active.fetch_sub(1, Ordering::SeqCst);
             return Err(Error::HttpStatus(code));
         }
         let upgraded = hyper::upgrade::on(response).await?;
+        error!("made stream, had {} active", connection.active.load(Ordering::SeqCst));
         Ok(Stream {
             stream: upgraded,
             counter: connection.active,
+            last_use: connection.last_use,
         })
     }
 }
