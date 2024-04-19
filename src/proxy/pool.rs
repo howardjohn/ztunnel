@@ -27,6 +27,7 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tracing::error;
 
 use crate::identity::Identity;
 use crate::proxy::Error;
@@ -43,7 +44,7 @@ struct Pooled {
 }
 
 const POOL_TIMEOUT: Duration = Duration::from_secs(5); // TODO
-const POOL_REQUESTS_PER_CONN: usize = 100; // TODO
+const POOL_REQUESTS_PER_CONN: usize = 5; // TODO
 
 impl Pooled {
     fn is_usable(&self) -> bool {
@@ -80,6 +81,7 @@ impl Pool {
     // If not, and a new connection should be established, None will be returned
     // If not, we will wait for another connection to be established by someone else, then return it.
     pub async fn checkout(&self, key: &Key) -> Option<Client> {
+        error!("checkout");
         let maybe_rx = {
             let mut inner = self.inner.lock().unwrap();
             let resp = inner.pooled.get_mut(key).and_then(|conns| {
@@ -91,6 +93,7 @@ impl Pool {
                     v.value.clone()
                 })
             });
+            error!("checkout {resp:?}");
             if let Some(conns) = inner.pooled.get(key) {
                 if conns.is_empty() {
                     inner.pooled.remove(key);
@@ -103,12 +106,14 @@ impl Pool {
             if let Some(num_connecting) = inner.connecting.get(key) {
                 // There is already some establishing connections...
                 let waiters = inner.waiters.get(key).map(|w| w.len()).unwrap_or_default();
+                error!("checkout connecting={num_connecting:?} waiters={waiters}");
                 if waiters < num_connecting * POOL_REQUESTS_PER_CONN {
                     // the establishing connections can each serve POOL_REQUESTS_PER_CONN.
                     // We have 'waiter' number of clients waiting for a connection
                     // If the in-progress connections can fit us, become a waiter.
                     let (tx, rx) = oneshot::channel();
                     inner.waiters.entry(key.clone()).or_default().push_back(tx);
+                    error!("checkout we are a waiter");
                     Some(rx)
                 } else {
                     None
@@ -119,11 +124,16 @@ impl Pool {
         };
 
         if let Some(rx) = maybe_rx {
+            error!("checkout waiting...");
             if let Ok(c) = rx.await {
+                error!("checkout found!");
                 return Some(c);
+            } else {
+                error!("checkout wait failed..!");
             }
         }
 
+        error!("checkout we need to open our own connection..!");
         // If we got here, the caller should open a connection.
         None
     }
@@ -142,6 +152,8 @@ impl Pool {
     // add_to_pool adds a connection to the pool for the key
     pub fn add_to_pool(&self, key: &Key, value: Client) -> Client {
         let mut inner = self.inner.lock().unwrap();
+        let c = inner.connecting.get_mut(key).expect("there must be a connecting");
+        *c -= 1;
         let to_insert = value.clone();
         // Insert our new entry
         let mut entry = Pooled {
