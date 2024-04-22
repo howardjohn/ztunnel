@@ -137,6 +137,7 @@ impl Service {
             match req.uri().path() {
                 "/debug/pprof/profile" => handle_pprof(req).await,
                 "/debug/pprof/heap" => handle_jemalloc_pprof_heapgen(req).await,
+                "/debug/tasks" => handle_tokio_tasks(req).await,
                 "/quitquitquit" => Ok(handle_server_shutdown(
                     state.shutdown_trigger.clone(),
                     req,
@@ -413,6 +414,23 @@ async fn handle_jemalloc_pprof_heapgen(
 async fn handle_jemalloc_pprof_heapgen(
     _req: Request<Incoming>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
+    Ok(Response::builder()
+        .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+        .body("jemalloc not enabled".into())
+        .expect("builder with known status code should not fail"))
+}
+
+async fn handle_tokio_tasks(
+    _req: Request<Incoming>,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    let handle = tokio::runtime::Handle::current();
+    if let Ok(dump) = tokio::time::timeout(Duration::from_secs(5), handle.dump()).await {
+        for (i, task) in dump.tasks().iter().enumerate() {
+            let trace = task.trace();
+            println!("TASK {i}:");
+            println!("{trace}\n");
+        }
+    }
     Ok(Response::builder()
         .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
         .body("jemalloc not enabled".into())
