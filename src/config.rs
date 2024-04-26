@@ -66,7 +66,7 @@ const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
 const DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
-const DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION: u16 = 100; //Go: 100, Hyper: 200, Envoy: 2147483647 (lol), Spec recommended minimum 100
+const DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION: u16 = 10000; //Go: 100, Hyper: 200, Envoy: 2147483647 (lol), Spec recommended minimum 100
 
 const DEFAULT_INPOD_MARK: u32 = 1337;
 

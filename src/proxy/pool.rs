@@ -92,6 +92,7 @@ impl ConnSpawner {
         let builder = c_builder
             .initial_stream_window_size(self.cfg.window_size)
             .max_frame_size(self.cfg.frame_size)
+            .initial_max_send_streams(100000)
             .initial_connection_window_size(self.cfg.connection_window_size);
 
         let local = self

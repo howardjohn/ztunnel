@@ -129,6 +129,7 @@ impl Inbound {
                     // us from holding many stale conns from deceased clients
                     .keep_alive_interval(Some(Duration::from_secs(10)))
                     .max_frame_size(pi.cfg.frame_size)
+                    .max_concurrent_streams(100000)
                     // 64KB max; default is 16MB driven from Golang's defaults
                     // Since we know we are going to recieve a bounded set of headers, more is overkill.
                     .max_header_list_size(65536)
