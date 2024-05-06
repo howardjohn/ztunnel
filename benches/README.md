@@ -1,3 +1,11 @@
+# Networking setup
+
+sudo benches/setup-networking.sh
+sudo env PROXY_WORKLOAD_INFO=default/client/default PACKET_MARK=1337 PROXY_MODE=dedicated FAKE_CA=true XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml ip netns exec client-node ./out/rust/quick-release/ztunnel
+sudo env ENABLE_ORIG_SRC=false PROXY_WORKLOAD_INFO=default/server/default PROXY_MODE=dedicated FAKE_CA=true XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml ip netns exec server-node ./out/rust/quick-release/ztunnel
+sudo ip netns exec server-node server
+sudo ip netns exec client-node curl 172.173.0.3:8080
+
 # Benchmarks
 
 This folder provides Rust benchmarks.
