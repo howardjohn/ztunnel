@@ -15,8 +15,15 @@
 extern crate core;
 
 use std::sync::Arc;
+use opentelemetry_otlp::WithExportConfig;
 use tracing::info;
+use tracing_subscriber::{EnvFilter, Registry};
 use ztunnel::*;
+use tracing_subscriber::{
+    layer::{Layer, SubscriberExt},
+    filter::{filter_fn, LevelFilter},
+    util::SubscriberInitExt,
+};
 
 #[cfg(feature = "jemalloc")]
 #[cfg(feature = "jemalloc")]
@@ -29,7 +36,7 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 fn main() -> anyhow::Result<()> {
-    let _log_flush = telemetry::setup_logging();
+    // let _log_flush = telemetry::setup_logging();
     let config = Arc::new(config::parse_config()?);
 
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
@@ -73,5 +80,20 @@ fn version() -> anyhow::Result<()> {
 async fn proxy(cfg: Arc<config::Config>) -> anyhow::Result<()> {
     info!("version: {}", version::BuildInfo::new());
     info!("running with config: {}", serde_yaml::to_string(&cfg)?);
+
+    // Create a gRPC exporter
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(opentelemetry_otlp::new_exporter().tonic().with_export_config())
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
+        .expect("Couldn't create OTLP tracer");
+    let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    let fmt_layer = tracing_subscriber::fmt::layer();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(fmt_layer)
+        .with(telemetry_layer)
+        .init();
     app::build(cfg).await?.wait_termination().await
 }
