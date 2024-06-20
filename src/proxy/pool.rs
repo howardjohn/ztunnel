@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #![warn(clippy::cast_lossless)]
-use super::{h2, ScopedSecretManager};
+use super::{h2, ScopedSecretManager, util};
 use super::{Error, SocketFactory};
 use std::time::Duration;
 
@@ -91,9 +91,9 @@ impl ConnSpawner {
         let cert = self.cert_manager.fetch_certificate(&key.src_id).await?;
         let connector = cert.outbound_connector(key.dst_id.clone())?;
         let tcp_stream =
-            super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?;
+            util::new_logging_io("upstream encrypted", super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?);
 
-        let tls_stream = connector.connect(tcp_stream).await?;
+        let tls_stream = util::new_logging_io("upstream plaintext", connector.connect(tcp_stream).await?);
         trace!("connector connected, handshaking");
         let sender =
             h2::client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())

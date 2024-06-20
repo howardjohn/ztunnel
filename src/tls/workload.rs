@@ -27,6 +27,7 @@ use rustls::{
 };
 use std::future::Future;
 use std::io;
+use std::net::{IpAddr, Ipv4Addr};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -161,21 +162,17 @@ pub struct OutboundConnector {
 }
 
 impl OutboundConnector {
-    pub async fn connect(
-        self,
-        stream: TcpStream,
-    ) -> Result<client::TlsStream<TcpStream>, io::Error> {
-        let dest = ServerName::IpAddress(
-            stream
-                .peer_addr()
-                .expect("peer_addr must be set")
-                .ip()
-                .into(),
-        );
+    pub async fn connect<S>(self, stream: S) -> Result<client::TlsStream<S>, io::Error>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        // Destination doesn't matter here but the upstream API requires it. We do our own validation.
+        let dest = ServerName::IpAddress(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)).into());
         let c = tokio_rustls::TlsConnector::from(self.client_config);
         c.connect(dest, stream).await
     }
 }
+
 
 #[derive(Debug)]
 pub struct IdentityVerifier {

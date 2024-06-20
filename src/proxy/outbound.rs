@@ -124,6 +124,7 @@ impl Outbound {
                         .instrument(span);
 
                         assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
+                        let serve_outbound_connection = util::TimedWrapper::new(serve_outbound_connection);
                         tokio::spawn(serve_outbound_connection);
                     }
                     Err(e) => {
@@ -267,7 +268,12 @@ impl OutboundConnection {
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-        copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
+        copy::copy_bidirectional(
+            util::new_logging_io("downstream", stream),
+            upgraded,
+            connection_stats,
+        )
+        .await
     }
 
     async fn send_hbone_request(

@@ -108,11 +108,14 @@ impl H2ConnectClient {
     }
 }
 
-pub async fn spawn_connection(
+pub async fn spawn_connection<S>(
     cfg: Arc<config::Config>,
-    s: TlsStream<TcpStream>,
+    s: S,
     driver_drain: Receiver<bool>,
-) -> Result<H2ConnectClient, Error> {
+) -> Result<H2ConnectClient, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let mut builder = h2::client::Builder::new();
     builder
         .initial_window_size(cfg.window_size)

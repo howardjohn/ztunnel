@@ -94,8 +94,10 @@ where
     let (mut ru, mut wu) = upstream.split_into_buffered_reader();
 
     let downstream_to_upstream = async {
-        let res = copy_buf(&mut rd, &mut wu, stats, false).await;
+        let mut nwu = crate::proxy::util::new_logging_writer("upstream copy", &mut wu);
+        let res = copy_buf(&mut rd, &mut nwu, stats, false).await;
         trace!(?res, "send");
+        drop(nwu);
         ignore_shutdown_errors(wu.shutdown().await)?;
         res
     };
