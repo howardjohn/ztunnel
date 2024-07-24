@@ -48,8 +48,12 @@ pub fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
         .lossy(false)
         .buffered_lines_limit(1000) // Buffer up to 1000 lines to avoid blocking on logs
         .finish(std::io::stdout());
+
+    let (chrome_layer, _guard2) = tracing_chrome::ChromeLayerBuilder::new().build();
+    Box::leak(Box::new(_guard2));
     tracing_subscriber::registry()
-        .with(fmt_layer(non_blocking))
+        .with(chrome_layer)
+        // .with(fmt_layer(non_blocking))
         .init();
     _guard
 }
