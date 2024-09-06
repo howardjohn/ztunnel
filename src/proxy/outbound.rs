@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::{IpAddr, SocketAddr};
+use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use futures_util::TryFutureExt;
@@ -30,6 +31,7 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult, DerivedWorkload};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 
+use crate::copy::BufferedSplitter;
 use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::H2Stream;
@@ -42,6 +44,22 @@ pub struct Outbound {
     pi: Arc<ProxyInputs>,
     drain: DrainWatcher,
     listener: socket::Listener,
+}
+
+#[derive(thiserror::Error, Debug, Clone)]
+pub enum OutboundProxyError {
+    #[error("General")]
+    General,
+    #[error("NotAllowed")]
+    NotAllowed,
+    #[error("NetworkUnreachable")]
+    NetworkUnreachable,
+    #[error("HostUnreachable")]
+    HostUnreachable,
+    #[error("ConnectionRefused")]
+    ConnectionRefused,
+    #[error("CommandNotSupported")]
+    CommandNotSupported,
 }
 
 impl Outbound {
@@ -91,6 +109,7 @@ impl Outbound {
                                 id: TraceParent::new(),
                                 pool: pool.clone(),
                                 hbone_port: self.pi.cfg.inbound_addr.port(),
+                                send_socks5_success: false,
                             };
                             let span = info_span!("outbound", id=%oc.id);
                             let serve_outbound_connection = (async move {
@@ -137,6 +156,7 @@ pub(super) struct OutboundConnection {
     pub(super) id: TraceParent,
     pub(super) pool: proxy::pool::WorkloadHBONEPool,
     pub(super) hbone_port: u16,
+    pub(super) send_socks5_success: bool,
 }
 
 impl OutboundConnection {
@@ -144,15 +164,16 @@ impl OutboundConnection {
         let source_addr =
             socket::to_canonical(source_stream.peer_addr().expect("must receive peer addr"));
         let dst_addr = socket::orig_dst_addr_or_default(&source_stream);
-        self.proxy_to(source_stream, source_addr, dst_addr).await;
+        // Any errors should already be logged (function returns an error as socks5 mode needs it).
+        let _ = self.proxy_to(source_stream, source_addr, dst_addr).await;
     }
 
     pub async fn proxy_to(
         &mut self,
-        source_stream: TcpStream,
+        mut source_stream: TcpStream,
         source_addr: SocketAddr,
         dest_addr: SocketAddr,
-    ) {
+    ) -> Result<(), OutboundProxyError> {
         let start = Instant::now();
 
         // First find the source workload of this traffic. If we don't know where the request is from
@@ -166,7 +187,7 @@ impl OutboundConnection {
             Ok(req) => Box::new(req),
             Err(err) => {
                 metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
-                return;
+                return Err(OutboundProxyError::General);
             }
         };
         // TODO: should we use the original address or the actual address? Both seems nice!
@@ -187,28 +208,74 @@ impl OutboundConnection {
             metrics,
         ));
 
-        let res = match req.protocol {
-            Protocol::HBONE => {
-                self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
-                    .await
-            }
-            Protocol::TCP => {
-                self.proxy_to_tcp(source_stream, &req, &result_tracker)
-                    .await
-            }
+        let res = || async {
+            match req.protocol {
+                Protocol::HBONE => {
+                    match self.proxy_to_hbone(source_addr, &req).await {
+                        Ok(outbound) => {
+                            self.maybe_send_socks5_success(&mut source_stream, outbound.local_addr)
+                                .await?;
+                            // Proxying data between downstream and upstream
+                            copy::copy_bidirectional(
+                                copy::TcpStreamSplitter(source_stream),
+                                outbound,
+                                &result_tracker,
+                            )
+                            .await
+                        }
+                        Err(err) => {
+                            let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+                            crate::proxy::socks5::send_response(
+                                Some(OutboundProxyError::ConnectionRefused),
+                                &mut source_stream,
+                                dummy_addr,
+                            )
+                            .await
+                        }
+                    }
+                }
+                Protocol::TCP => {
+                    match self.proxy_to_tcp(&req).await {
+                        Ok(outbound) => {
+                            self.maybe_send_socks5_success(
+                                &mut source_stream,
+                                outbound.0.local_addr().unwrap(),
+                            )
+                            .await?;
+                            // Proxying data between downstream and upstream
+                            copy::copy_bidirectional(
+                                copy::TcpStreamSplitter(source_stream),
+                                outbound,
+                                &result_tracker,
+                            )
+                            .await
+                        }
+                        Err(err) => {
+                            let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+                            crate::proxy::socks5::send_response(
+                                Some(OutboundProxyError::ConnectionRefused),
+                                &mut source_stream,
+                                dummy_addr,
+                            )
+                            .await
+                        }
+                    }
+                }
+            };
         };
-        result_tracker.record(res)
+        let r = res();
+        let rr = r.await;
+        result_tracker.record(rr);
+        Ok(())
     }
 
     async fn proxy_to_hbone(
         &mut self,
-        stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
-        connection_stats: &ConnectionResult,
-    ) -> Result<(), Error> {
+    ) -> Result<H2Stream, Error> {
         let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-        copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
+        Ok(upgraded)
     }
 
     async fn send_hbone_request(
@@ -250,26 +317,14 @@ impl OutboundConnection {
         Ok(upgraded)
     }
 
-    async fn proxy_to_tcp(
-        &mut self,
-        stream: TcpStream,
-        req: &Request,
-        connection_stats: &ConnectionResult,
-    ) -> Result<(), Error> {
+    async fn proxy_to_tcp(&mut self, req: &Request) -> Result<copy::TcpStreamSplitter, Error> {
         let outbound = super::freebind_connect(
             None, // No need to spoof source IP on outbound
             req.actual_destination,
             self.pi.socket_factory.as_ref(),
         )
         .await?;
-
-        // Proxying data between downstream and upstream
-        copy::copy_bidirectional(
-            copy::TcpStreamSplitter(stream),
-            copy::TcpStreamSplitter(outbound),
-            connection_stats,
-        )
-        .await
+        Ok(copy::TcpStreamSplitter(outbound))
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
@@ -422,6 +477,17 @@ impl OutboundConnection {
             upstream_sans,
         })
     }
+
+    async fn maybe_send_socks5_success(
+        &mut self,
+        source_stream: &mut TcpStream,
+        local_addr: SocketAddr,
+    ) -> Result<(), Error> {
+        if !self.send_socks5_success {
+            return Ok(());
+        }
+        crate::proxy::socks5::send_response(None, source_stream, local_addr).await
+    }
 }
 
 fn baggage(r: &Request, cluster: String) -> String {
@@ -571,6 +637,7 @@ mod tests {
                 local_workload_information.clone(),
             ),
             hbone_port: cfg.inbound_addr.port(),
+            send_socks5_success: false,
         };
 
         let local = outbound

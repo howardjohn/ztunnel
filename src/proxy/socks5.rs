@@ -20,11 +20,12 @@ use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
 use hickory_server::authority::MessageRequest;
 use hickory_server::server::{Protocol, Request};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::dns::resolver::Resolver;
+use outbound::OutboundProxyError;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -34,7 +35,7 @@ use tracing::{debug, error, info, info_span, Instrument};
 use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
 use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::{util, Error, ProxyInputs, TraceParent};
+use crate::proxy::{outbound, util, Error, ProxyInputs, TraceParent};
 use crate::{assertions, socket};
 
 pub(super) struct Socks5 {
@@ -92,6 +93,7 @@ impl Socks5 {
                                 id: TraceParent::new(),
                                 pool: pool.clone(),
                                 hbone_port: self.pi.cfg.inbound_addr.port(),
+                                send_socks5_success: true,
                             };
                             let span = info_span!("socks5", id=%oc.id);
                             let serve = (async move {
@@ -136,7 +138,7 @@ impl Socks5 {
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6
-async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
+async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(), OutboundProxyError> {
     let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
 
     // Version(5), Number of auth methods
@@ -150,7 +152,7 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
     let nmethods = version[1];
 
     if nmethods == 0 {
-        return Err(anyhow::anyhow!("Invalid auth methods"));
+        return Err(OutboundProxyError::CommandNotSupported.into());
     }
 
     // List of supported auth methods
@@ -159,7 +161,7 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
 
     // Client must include 'unauthenticated' (0).
     if !methods.into_iter().any(|x| x == 0) {
-        return Err(anyhow::anyhow!("unsupported auth method"));
+        return Err(OutboundProxyError::CommandNotSupported.into());
     }
 
     // Select 'unauthenticated' (0).
@@ -171,11 +173,11 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
     let version = version_command[0];
 
     if version != 0x05 {
-        return Err(anyhow::anyhow!("unsupported version"));
+        return Err(OutboundProxyError::CommandNotSupported.into());
     }
 
     if version_command[1] != 1 {
-        return Err(anyhow::anyhow!("unsupported command"));
+        return Err(OutboundProxyError::CommandNotSupported.into());
     }
 
     // Skip RSV
@@ -213,12 +215,9 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
             };
 
             ip = dns_lookup(resolver.clone(), remote_addr, ds).await?;
-            // oc.pi.resolver.lookup()
-            // oc.pi.lookup_service_or_query(ds)
-            // return Err(anyhow::anyhow!("unsupported host {ds:?}"));
         }
         _ => {
-            return Err(anyhow::anyhow!("unsupported host"));
+            return Err(OutboundProxyError::HostUnreachable.into());
         }
     };
 
@@ -228,21 +227,14 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
 
     let host = SocketAddr::new(ip, port);
 
-    // Send dummy values - the client generally ignores it.
-    let buf = [
-        0x05u8, // version
-        // TODO: report appropriate error here. Unfortunately this needs to happen *after* we connect
-        // That is, we need to do this within proxy_to().
-        0x00, // Success.
-        0x00, // reserved
-        // Address. TODO: actually return the address instead of hardcoded 0.0.0.0
-        0x01, 0x00, 0x00, 0x00, 0x00, // Port. TODO: actually return the port
-        0x00, 0x00,
-    ];
-    stream.write_all(&buf).await?;
-
     debug!("accepted connection from {remote_addr} to {host}");
-    oc.proxy_to(stream, remote_addr, host).await;
+    if let Err(e) = oc.proxy_to(stream, remote_addr, host).await {
+        // Got an error, need to send that...
+        // Not sure anywhere this is specified, but it seems common to return all zeros when we fail to bind
+        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+        todo!();
+        // send_response(Some(e), stream, dummy_addr)
+    }
     Ok(())
 }
 
@@ -294,4 +286,39 @@ async fn dns_lookup(
         .ok_or_else(|| Error::DnsEmpty)?;
 
     Ok(response)
+}
+
+pub async fn send_response(
+    err: Option<OutboundProxyError>,
+    source: &mut TcpStream,
+    local: SocketAddr,
+) -> Result<(), Error> {
+    // https://www.rfc-editor.org/rfc/rfc1928#section-6
+    let mut buf: Vec<u8> = Vec::with_capacity(10);
+    buf.push(0x05); // version
+                    // Status
+    buf.push(match err {
+        None => 0,
+        Some(OutboundProxyError::General) => 1,
+        Some(OutboundProxyError::NotAllowed) => 2,
+        Some(OutboundProxyError::NetworkUnreachable) => 3,
+        Some(OutboundProxyError::HostUnreachable) => 4,
+        Some(OutboundProxyError::ConnectionRefused) => 5,
+        Some(OutboundProxyError::CommandNotSupported) => 7,
+    });
+    buf.push(0); // RSV
+    match local {
+        SocketAddr::V4(addr_v4) => {
+            buf.push(0x01); // IPv4 address type
+            buf.extend_from_slice(&addr_v4.ip().octets());
+        }
+        SocketAddr::V6(addr_v6) => {
+            buf.push(0x04); // IPv6 address type
+            buf.extend_from_slice(&addr_v6.ip().octets());
+        }
+    }
+    // Add port in network byte order (big-endian)
+    buf.extend_from_slice(&local.port().to_be_bytes());
+    source.write_all(&buf).await?;
+    Ok(())
 }

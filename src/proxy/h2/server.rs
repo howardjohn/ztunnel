@@ -20,6 +20,7 @@ use futures_util::FutureExt;
 use http::request::Parts;
 use http::Response;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -30,6 +31,7 @@ pub struct H2Request {
     request: Parts,
     recv: h2::RecvStream,
     send: h2::server::SendResponse<Bytes>,
+    local_addr: SocketAddr,
 }
 
 impl H2Request {
@@ -67,7 +69,11 @@ impl H2Request {
             send_stream: send,
             _dropped: None, // We do not need to track on the server
         };
-        let h2 = crate::proxy::h2::H2Stream { read, write };
+        let h2 = crate::proxy::h2::H2Stream {
+            read,
+            write,
+            local_addr: self.local_addr,
+        };
         Ok(h2)
     }
 }
@@ -84,6 +90,10 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let mut builder = h2::server::Builder::new();
+
+    let (tcp, _) = s.get_ref();
+    let local_addr = tcp.local_addr().expect("local_addr should be available");
+
     let mut conn = builder
         .initial_window_size(cfg.window_size)
         .initial_connection_window_size(cfg.connection_window_size)
@@ -128,6 +138,7 @@ where
                     request,
                     recv,
                     send,
+                    local_addr,
                 };
                 let handle = handler(req);
                 // Serve the stream in a new task

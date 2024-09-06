@@ -17,6 +17,7 @@ use bytes::Bytes;
 use futures_core::ready;
 use h2::Reason;
 use std::io::Error;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
@@ -73,6 +74,7 @@ async fn do_ping_pong(
 pub struct H2Stream {
     read: H2StreamReadHalf,
     write: H2StreamWriteHalf,
+    pub local_addr: SocketAddr,
 }
 
 pub struct H2StreamReadHalf {
@@ -111,7 +113,7 @@ impl crate::copy::BufferedSplitter for H2Stream {
     type R = H2StreamReadHalf;
     type W = H2StreamWriteHalf;
     fn split_into_buffered_reader(self) -> (H2StreamReadHalf, H2StreamWriteHalf) {
-        let H2Stream { read, write } = self;
+        let H2Stream { read, write, .. } = self;
         (read, write)
     }
 }

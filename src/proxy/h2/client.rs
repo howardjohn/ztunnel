@@ -18,6 +18,7 @@ use bytes::{Buf, Bytes};
 use h2::client::{Connection, SendRequest};
 use h2::SendStream;
 use http::Request;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -34,6 +35,7 @@ pub struct H2ConnectClient {
     sender: SendRequest<Bytes>,
     pub max_allowed_streams: u16,
     stream_count: Arc<AtomicU16>,
+    local_addr: SocketAddr,
 }
 
 impl H2ConnectClient {
@@ -76,6 +78,7 @@ impl H2ConnectClient {
                 return Err(e);
             }
         };
+        let local_addr = self.local_addr;
 
         let (dropped1, dropped2) = crate::proxy::h2::DropCounter::new(self.stream_count.clone());
         let read = crate::proxy::h2::H2StreamReadHalf {
@@ -86,7 +89,11 @@ impl H2ConnectClient {
             send_stream: send,
             _dropped: dropped2,
         };
-        let h2 = crate::proxy::h2::H2Stream { read, write };
+        let h2 = crate::proxy::h2::H2Stream {
+            read,
+            write,
+            local_addr,
+        };
         Ok(h2)
     }
 
@@ -123,11 +130,13 @@ pub async fn spawn_connection(
         .max_send_buffer_size(cfg.window_size as usize)
         .enable_push(false);
 
+    let (tcp, _) = s.get_ref();
+    let local_addr = tcp.local_addr().expect("local_addr should be available");
+
     let (send_req, connection) = builder
         .handshake::<_, Bytes>(s)
         .await
         .map_err(Error::Http2Handshake)?;
-
     // We store max as u16, so if they report above that max size we just cap at u16::MAX
     let max_allowed_streams = std::cmp::min(
         cfg.pool_max_streams_per_conn,
@@ -148,6 +157,7 @@ pub async fn spawn_connection(
 
     let c = H2ConnectClient {
         sender: send_req,
+        local_addr,
         stream_count: Arc::new(AtomicU16::new(0)),
         max_allowed_streams,
     };
