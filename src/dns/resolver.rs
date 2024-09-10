@@ -24,51 +24,48 @@ use std::slice::Iter;
 /// may not.
 #[async_trait::async_trait]
 pub trait Resolver: Sync + Send {
-    async fn lookup(&self, request: &Request) -> Result<Answer, LookupError>;
+	async fn lookup(&self, request: &Request) -> Result<Answer, LookupError>;
 }
 
 /// Answer returned by a [Resolver].
 #[derive(Debug)]
 pub struct Answer {
-    records: Vec<Record>,
-    is_authoritative: bool,
+	records: Vec<Record>,
+	is_authoritative: bool,
 }
 
 impl Answer {
-    pub fn new(records: Vec<Record>, is_authoritative: bool) -> Self {
-        Self {
-            records,
-            is_authoritative,
-        }
-    }
+	pub fn new(records: Vec<Record>, is_authoritative: bool) -> Self {
+		Self { records, is_authoritative }
+	}
 
-    /// Returns an iterator over the records returned by the [Resolver].
-    pub fn record_iter(&self) -> RecordIter<'_> {
-        RecordIter(self.records.iter())
-    }
+	/// Returns an iterator over the records returned by the [Resolver].
+	pub fn record_iter(&self) -> RecordIter<'_> {
+		RecordIter(self.records.iter())
+	}
 
-    /// Indicates whether the [Resolver] is the authority for the returned records.
-    pub fn is_authoritative(&self) -> bool {
-        self.is_authoritative
-    }
+	/// Indicates whether the [Resolver] is the authority for the returned records.
+	pub fn is_authoritative(&self) -> bool {
+		self.is_authoritative
+	}
 }
 
 impl From<Lookup> for Answer {
-    fn from(value: Lookup) -> Self {
-        Self {
-            records: value.records().to_vec(),
-            is_authoritative: false, // Non-authoritative, since results came from upstream resolver.
-        }
-    }
+	fn from(value: Lookup) -> Self {
+		Self {
+			records: value.records().to_vec(),
+			is_authoritative: false, // Non-authoritative, since results came from upstream resolver.
+		}
+	}
 }
 
 /// Borrowed view of set of [`Record`]s returned from an [Answer].
 pub struct RecordIter<'a>(Iter<'a, Record>);
 
 impl<'a> Iterator for RecordIter<'a> {
-    type Item = &'a Record;
+	type Item = &'a Record;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
-    }
+	fn next(&mut self) -> Option<Self::Item> {
+		self.0.next()
+	}
 }

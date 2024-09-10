@@ -29,286 +29,250 @@ use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateSer
 use crate::xds::istio::ca::IstioCertificateRequest;
 
 pub struct CaClient {
-    pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
-    pub enable_impersonated_identity: bool,
-    pub secret_ttl: i64,
+	pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
+	pub enable_impersonated_identity: bool,
+	pub secret_ttl: i64,
 }
 
 impl CaClient {
-    pub async fn new(
-        address: String,
-        cert_provider: Box<dyn tls::ControlPlaneClientCertProvider>,
-        auth: AuthSource,
-        enable_impersonated_identity: bool,
-        secret_ttl: i64,
-    ) -> Result<CaClient, Error> {
-        let svc = tls::grpc_connector(address, cert_provider.fetch_cert().await?)?;
+	pub async fn new(
+		address: String,
+		cert_provider: Box<dyn tls::ControlPlaneClientCertProvider>,
+		auth: AuthSource,
+		enable_impersonated_identity: bool,
+		secret_ttl: i64,
+	) -> Result<CaClient, Error> {
+		let svc = tls::grpc_connector(address, cert_provider.fetch_cert().await?)?;
 
-        let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
-        Ok(CaClient {
-            client,
-            enable_impersonated_identity,
-            secret_ttl,
-        })
-    }
+		let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
+		Ok(CaClient { client, enable_impersonated_identity, secret_ttl })
+	}
 }
 
 impl CaClient {
-    #[instrument(skip_all)]
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
-        let cs = tls::csr::CsrOptions {
-            san: id.to_string(),
-        }
-        .generate()?;
-        let csr = cs.csr;
-        let private_key = cs.private_key;
+	#[instrument(skip_all)]
+	async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
+		let cs = tls::csr::CsrOptions { san: id.to_string() }.generate()?;
+		let csr = cs.csr;
+		let private_key = cs.private_key;
 
-        let req = IstioCertificateRequest {
-            csr,
-            validity_duration: self.secret_ttl,
-            metadata: {
-                if self.enable_impersonated_identity {
-                    Some(Struct {
-                        fields: BTreeMap::from([(
-                            "ImpersonatedIdentity".into(),
-                            prost_types::Value {
-                                kind: Some(Kind::StringValue(id.to_string())),
-                            },
-                        )]),
-                    })
-                } else {
-                    None
-                }
-            },
-        };
-        let resp = self
-            .client
-            .clone()
-            .create_certificate(req)
-            .await?
-            .into_inner();
-        let leaf = resp
-            .cert_chain
-            .first()
-            .ok_or_else(|| Error::EmptyResponse(id.to_owned()))?
-            .as_bytes();
-        let chain = if resp.cert_chain.len() > 1 {
-            resp.cert_chain[1..].iter().map(|s| s.as_bytes()).collect()
-        } else {
-            warn!("no chain certs for: {}", id);
-            vec![]
-        };
-        let certs = tls::WorkloadCertificate::new(&private_key, leaf, chain)?;
-        // Make the certificate actually matches the identity we requested.
-        if self.enable_impersonated_identity && certs.cert.identity().as_ref() != Some(id) {
-            error!(
-                "expected identity {:?}, got {:?}",
-                id,
-                certs.cert.identity()
-            );
-            return Err(Error::SanError(id.to_owned()));
-        }
-        Ok(certs)
-    }
+		let req = IstioCertificateRequest {
+			csr,
+			validity_duration: self.secret_ttl,
+			metadata: {
+				if self.enable_impersonated_identity {
+					Some(Struct {
+						fields: BTreeMap::from([(
+							"ImpersonatedIdentity".into(),
+							prost_types::Value { kind: Some(Kind::StringValue(id.to_string())) },
+						)]),
+					})
+				} else {
+					None
+				}
+			},
+		};
+		let resp = self
+			.client
+			.clone()
+			.create_certificate(req)
+			.await?
+			.into_inner();
+		let leaf = resp
+			.cert_chain
+			.first()
+			.ok_or_else(|| Error::EmptyResponse(id.to_owned()))?
+			.as_bytes();
+		let chain = if resp.cert_chain.len() > 1 {
+			resp.cert_chain[1..].iter().map(|s| s.as_bytes()).collect()
+		} else {
+			warn!("no chain certs for: {}", id);
+			vec![]
+		};
+		let certs = tls::WorkloadCertificate::new(&private_key, leaf, chain)?;
+		// Make the certificate actually matches the identity we requested.
+		if self.enable_impersonated_identity && certs.cert.identity().as_ref() != Some(id) {
+			error!("expected identity {:?}, got {:?}", id, certs.cert.identity());
+			return Err(Error::SanError(id.to_owned()));
+		}
+		Ok(certs)
+	}
 }
 
 #[async_trait]
 impl crate::identity::CaClientTrait for CaClient {
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
-        self.fetch_certificate(id).await
-    }
+	async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
+		self.fetch_certificate(id).await
+	}
 }
 
 #[cfg(any(test, feature = "testing"))]
 pub mod mock {
-    use std::sync::Arc;
-    use std::time::Duration;
+	use std::sync::Arc;
+	use std::time::Duration;
 
-    use tokio::sync::RwLock;
-    use tokio::time::Instant;
+	use tokio::sync::RwLock;
+	use tokio::time::Instant;
 
-    use crate::identity::Identity;
+	use crate::identity::Identity;
 
-    use super::*;
+	use super::*;
 
-    #[derive(Default)]
-    struct ClientState {
-        fetches: Vec<Identity>,
-        error: bool,
-        gen: tls::mock::CertGenerator,
-    }
+	#[derive(Default)]
+	struct ClientState {
+		fetches: Vec<Identity>,
+		error: bool,
+		gen: tls::mock::CertGenerator,
+	}
 
-    #[derive(Clone)]
-    pub struct ClientConfig {
-        pub cert_lifetime: Duration,
-        pub time_conv: crate::time::Converter,
-        // If non-zero, causes fetch_certificate calls to sleep for the specified duration before
-        // returning. This is helpful to let tests that pause tokio time get more control over code
-        // execution.
-        pub fetch_latency: Duration,
-    }
+	#[derive(Clone)]
+	pub struct ClientConfig {
+		pub cert_lifetime: Duration,
+		pub time_conv: crate::time::Converter,
+		// If non-zero, causes fetch_certificate calls to sleep for the specified duration before
+		// returning. This is helpful to let tests that pause tokio time get more control over code
+		// execution.
+		pub fetch_latency: Duration,
+	}
 
-    impl Default for ClientConfig {
-        fn default() -> Self {
-            Self {
-                fetch_latency: Duration::ZERO,
-                cert_lifetime: Duration::from_secs(10),
-                time_conv: crate::time::Converter::new(),
-            }
-        }
-    }
+	impl Default for ClientConfig {
+		fn default() -> Self {
+			Self {
+				fetch_latency: Duration::ZERO,
+				cert_lifetime: Duration::from_secs(10),
+				time_conv: crate::time::Converter::new(),
+			}
+		}
+	}
 
-    #[derive(Clone)]
-    pub struct CaClient {
-        cfg: ClientConfig,
-        state: Arc<RwLock<ClientState>>,
-    }
+	#[derive(Clone)]
+	pub struct CaClient {
+		cfg: ClientConfig,
+		state: Arc<RwLock<ClientState>>,
+	}
 
-    impl CaClient {
-        pub fn new(cfg: ClientConfig) -> CaClient {
-            CaClient {
-                cfg,
-                state: Default::default(),
-            }
-        }
+	impl CaClient {
+		pub fn new(cfg: ClientConfig) -> CaClient {
+			CaClient { cfg, state: Default::default() }
+		}
 
-        pub fn cert_lifetime(&self) -> Duration {
-            self.cfg.cert_lifetime
-        }
+		pub fn cert_lifetime(&self) -> Duration {
+			self.cfg.cert_lifetime
+		}
 
-        // Returns a list of fetch_certificate calls, in the order they happened. Calls are added
-        // just before the function returns (ie. after the potential sleep controlled by the
-        // fetch_latency config option).
-        pub async fn fetches(&self) -> Vec<Identity> {
-            self.state.read().await.fetches.clone()
-        }
+		// Returns a list of fetch_certificate calls, in the order they happened. Calls are added
+		// just before the function returns (ie. after the potential sleep controlled by the
+		// fetch_latency config option).
+		pub async fn fetches(&self) -> Vec<Identity> {
+			self.state.read().await.fetches.clone()
+		}
 
-        pub async fn clear_fetches(&self) {
-            self.state.write().await.fetches.clear();
-        }
+		pub async fn clear_fetches(&self) {
+			self.state.write().await.fetches.clear();
+		}
 
-        async fn fetch_certificate(
-            &self,
-            id: &Identity,
-        ) -> Result<tls::WorkloadCertificate, Error> {
-            let Identity::Spiffe {
-                trust_domain: td,
-                namespace: ns,
-                ..
-            } = id;
-            if td == "error" {
-                return Err(match ns.as_str() {
-                    "forgotten" => Error::Forgotten,
-                    _ => panic!("cannot parse injected error: {ns}"),
-                });
-            }
+		async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
+			let Identity::Spiffe { trust_domain: td, namespace: ns, .. } = id;
+			if td == "error" {
+				return Err(match ns.as_str() {
+					"forgotten" => Error::Forgotten,
+					_ => panic!("cannot parse injected error: {ns}"),
+				});
+			}
 
-            if self.cfg.fetch_latency != Duration::ZERO {
-                tokio::time::sleep(self.cfg.fetch_latency).await;
-            }
+			if self.cfg.fetch_latency != Duration::ZERO {
+				tokio::time::sleep(self.cfg.fetch_latency).await;
+			}
 
-            // Get SystemTime::now() via Instant::now() to allow mocking in tests.
-            let not_before = self
-                .cfg
-                .time_conv
-                .instant_to_system_time(Instant::now().into())
-                .expect("SystemTime cannot represent current time. Was the process started in extreme future?");
-            let not_after = not_before + self.cfg.cert_lifetime;
+			// Get SystemTime::now() via Instant::now() to allow mocking in tests.
+			let not_before = self
+				.cfg
+				.time_conv
+				.instant_to_system_time(Instant::now().into())
+				.expect("SystemTime cannot represent current time. Was the process started in extreme future?");
+			let not_after = not_before + self.cfg.cert_lifetime;
 
-            let mut state = self.state.write().await;
-            if state.error {
-                return Err(Error::Spiffe("injected test error".into()));
-            }
-            let certs = state
-                .gen
-                .new_certs(&id.to_owned().into(), not_before, not_after);
-            state.fetches.push(id.to_owned());
-            Ok(certs)
-        }
+			let mut state = self.state.write().await;
+			if state.error {
+				return Err(Error::Spiffe("injected test error".into()));
+			}
+			let certs = state
+				.gen
+				.new_certs(&id.to_owned().into(), not_before, not_after);
+			state.fetches.push(id.to_owned());
+			Ok(certs)
+		}
 
-        pub async fn set_error(&mut self, error: bool) {
-            let mut state = self.state.write().await;
-            state.error = error;
-        }
-    }
+		pub async fn set_error(&mut self, error: bool) {
+			let mut state = self.state.write().await;
+			state.error = error;
+		}
+	}
 
-    #[async_trait]
-    impl crate::identity::CaClientTrait for CaClient {
-        async fn fetch_certificate(
-            &self,
-            id: &Identity,
-        ) -> Result<tls::WorkloadCertificate, Error> {
-            self.fetch_certificate(id).await
-        }
-    }
+	#[async_trait]
+	impl crate::identity::CaClientTrait for CaClient {
+		async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
+			self.fetch_certificate(id).await
+		}
+	}
 }
 
 #[cfg(test)]
 mod tests {
-    use std::iter;
-    use std::time::Duration;
+	use std::iter;
+	use std::time::Duration;
 
-    use matches::assert_matches;
+	use matches::assert_matches;
 
-    use crate::{
-        identity::{Error, Identity},
-        test_helpers, tls,
-        xds::istio::ca::IstioCertificateResponse,
-    };
+	use crate::{
+		identity::{Error, Identity},
+		test_helpers, tls,
+		xds::istio::ca::IstioCertificateResponse,
+	};
 
-    async fn test_ca_client_with_response(
-        res: IstioCertificateResponse,
-    ) -> Result<tls::WorkloadCertificate, Error> {
-        let (mock, ca_client) = test_helpers::ca::CaServer::spawn().await;
-        mock.send(Ok(res)).unwrap();
-        ca_client.fetch_certificate(&Identity::default()).await
-    }
+	async fn test_ca_client_with_response(res: IstioCertificateResponse) -> Result<tls::WorkloadCertificate, Error> {
+		let (mock, ca_client) = test_helpers::ca::CaServer::spawn().await;
+		mock.send(Ok(res)).unwrap();
+		ca_client.fetch_certificate(&Identity::default()).await
+	}
 
-    #[tokio::test]
-    async fn empty_chain() {
-        let res =
-            test_ca_client_with_response(IstioCertificateResponse { cert_chain: vec![] }).await;
-        assert_matches!(res, Err(Error::EmptyResponse(_)));
-    }
+	#[tokio::test]
+	async fn empty_chain() {
+		let res = test_ca_client_with_response(IstioCertificateResponse { cert_chain: vec![] }).await;
+		assert_matches!(res, Err(Error::EmptyResponse(_)));
+	}
 
-    #[tokio::test]
-    async fn wrong_identity() {
-        let id = Identity::Spiffe {
-            service_account: "wrong-sa".into(),
-            namespace: "foo".into(),
-            trust_domain: "cluster.local".into(),
-        };
-        let certs = tls::mock::generate_test_certs(
-            &id.into(),
-            Duration::from_secs(0),
-            Duration::from_secs(0),
-        );
+	#[tokio::test]
+	async fn wrong_identity() {
+		let id = Identity::Spiffe {
+			service_account: "wrong-sa".into(),
+			namespace: "foo".into(),
+			trust_domain: "cluster.local".into(),
+		};
+		let certs = tls::mock::generate_test_certs(&id.into(), Duration::from_secs(0), Duration::from_secs(0));
 
-        let res = test_ca_client_with_response(IstioCertificateResponse {
-            cert_chain: iter::once(certs.cert)
-                .chain(certs.chain)
-                .map(|c| c.as_pem())
-                .collect(),
-        })
-        .await;
-        assert_matches!(res, Err(Error::SanError(_)));
-    }
+		let res = test_ca_client_with_response(IstioCertificateResponse {
+			cert_chain: iter::once(certs.cert)
+				.chain(certs.chain)
+				.map(|c| c.as_pem())
+				.collect(),
+		})
+		.await;
+		assert_matches!(res, Err(Error::SanError(_)));
+	}
 
-    #[tokio::test]
-    async fn fetch_certificate() {
-        let certs = tls::mock::generate_test_certs(
-            &Identity::default().into(),
-            Duration::from_secs(0),
-            Duration::from_secs(0),
-        );
+	#[tokio::test]
+	async fn fetch_certificate() {
+		let certs =
+			tls::mock::generate_test_certs(&Identity::default().into(), Duration::from_secs(0), Duration::from_secs(0));
 
-        let res = test_ca_client_with_response(IstioCertificateResponse {
-            cert_chain: iter::once(certs.cert)
-                .chain(certs.chain)
-                .map(|c| c.as_pem())
-                .collect(),
-        })
-        .await;
-        assert_matches!(res, Ok(_));
-    }
+		let res = test_ca_client_with_response(IstioCertificateResponse {
+			cert_chain: iter::once(certs.cert)
+				.chain(certs.chain)
+				.map(|c| c.as_pem())
+				.collect(),
+		})
+		.await;
+		assert_matches!(res, Ok(_));
+	}
 }

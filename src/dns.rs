@@ -27,12 +27,12 @@ pub use server::*;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("failed to bind to address {0}: {1}")]
-    Bind(SocketAddr, io::Error),
+	#[error("failed to bind to address {0}: {1}")]
+	Bind(SocketAddr, io::Error),
 
-    #[error("io error: {0}")]
-    Io(#[from] io::Error),
+	#[error("io error: {0}")]
+	Io(#[from] io::Error),
 
-    #[error("{0}")]
-    Generic(Box<dyn std::error::Error + Send + Sync>),
+	#[error("{0}")]
+	Generic(Box<dyn std::error::Error + Send + Sync>),
 }

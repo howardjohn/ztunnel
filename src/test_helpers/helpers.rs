@@ -28,37 +28,37 @@ use crate::{proxy, telemetry};
 static TRACING: Lazy<()> = Lazy::new(telemetry::testing::setup_test_logging);
 
 pub fn initialize_telemetry() {
-    Lazy::force(&TRACING);
+	Lazy::force(&TRACING);
 }
 
 pub fn test_proxy_metrics() -> Arc<proxy::Metrics> {
-    let mut registry = Registry::default();
-    Arc::new(proxy::Metrics::new(sub_registry(&mut registry)))
+	let mut registry = Registry::default();
+	Arc::new(proxy::Metrics::new(sub_registry(&mut registry)))
 }
 
 pub fn with_ip(s: SocketAddr, ip: IpAddr) -> SocketAddr {
-    SocketAddr::new(ip, s.port())
+	SocketAddr::new(ip, s.port())
 }
 
 pub fn run_command(cmd: &str) -> anyhow::Result<()> {
-    let now = Instant::now();
-    debug!("running command {cmd}");
-    let output = Command::new("sh").arg("-c").arg(cmd).output()?;
-    debug!(
-        "command complete in {:?}; code={}, stdout={}, stderr={}",
-        now.elapsed(),
-        output.status,
-        std::str::from_utf8(&output.stdout)?,
-        std::str::from_utf8(&output.stderr)?
-    );
-    if !output.status.success() {
-        anyhow::bail!(
-            "command {} exited with code={}, stdout={}, stderr={}",
-            cmd.chars().take(50).collect::<String>(),
-            output.status,
-            std::str::from_utf8(&output.stdout)?,
-            std::str::from_utf8(&output.stderr)?
-        );
-    }
-    Ok(())
+	let now = Instant::now();
+	debug!("running command {cmd}");
+	let output = Command::new("sh").arg("-c").arg(cmd).output()?;
+	debug!(
+		"command complete in {:?}; code={}, stdout={}, stderr={}",
+		now.elapsed(),
+		output.status,
+		std::str::from_utf8(&output.stdout)?,
+		std::str::from_utf8(&output.stderr)?
+	);
+	if !output.status.success() {
+		anyhow::bail!(
+			"command {} exited with code={}, stdout={}, stderr={}",
+			cmd.chars().take(50).collect::<String>(),
+			output.status,
+			std::str::from_utf8(&output.stdout)?,
+			std::str::from_utf8(&output.stderr)?
+		);
+	}
+	Ok(())
 }

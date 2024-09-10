@@ -28,62 +28,57 @@ use tower::{BoxError, ServiceExt};
 /// tonic::body::BoxBody bodies.
 #[derive(Debug, Clone)]
 pub struct TowerToHyperService<S> {
-    service: S,
+	service: S,
 }
 
 impl<S> TowerToHyperService<S> {
-    /// Create a new `TowerToHyperService` from a tower service.
-    pub fn new(service: S) -> Self {
-        Self { service }
-    }
+	/// Create a new `TowerToHyperService` from a tower service.
+	pub fn new(service: S) -> Self {
+		Self { service }
+	}
 }
 
 impl<S> hyper::service::Service<hyper::Request<hyper::body::Incoming>> for TowerToHyperService<S>
 where
-    S: tower::Service<hyper::Request<BoxBody>> + Clone,
-    S::Error: Into<BoxError> + 'static,
+	S: tower::Service<hyper::Request<BoxBody>> + Clone,
+	S::Error: Into<BoxError> + 'static,
 {
-    type Response = S::Response;
-    type Error = BoxError;
-    type Future = TowerToHyperServiceFuture<S, hyper::Request<BoxBody>>;
+	type Response = S::Response;
+	type Error = BoxError;
+	type Future = TowerToHyperServiceFuture<S, hyper::Request<BoxBody>>;
 
-    fn call(&self, req: hyper::Request<hyper::body::Incoming>) -> Self::Future {
-        use http_body_util::BodyExt;
-        let req = req.map(|incoming| {
-            incoming
-                .map_err(|err| Status::from_error(err.into()))
-                .boxed_unsync()
-        });
-        TowerToHyperServiceFuture {
-            future: self.service.clone().oneshot(req),
-        }
-    }
+	fn call(&self, req: hyper::Request<hyper::body::Incoming>) -> Self::Future {
+		use http_body_util::BodyExt;
+		let req = req.map(|incoming| {
+			incoming
+				.map_err(|err| Status::from_error(err.into()))
+				.boxed_unsync()
+		});
+		TowerToHyperServiceFuture { future: self.service.clone().oneshot(req) }
+	}
 }
 
 pin_project! {
-    /// Future returned by [`TowerToHyperService`].
-    #[derive(Debug)]
-    pub struct TowerToHyperServiceFuture<S, R>
-    where
-        S: tower::Service<R>,
-    {
-        #[pin]
-        future: tower::util::Oneshot<S, R>,
-    }
+	/// Future returned by [`TowerToHyperService`].
+	#[derive(Debug)]
+	pub struct TowerToHyperServiceFuture<S, R>
+	where
+		S: tower::Service<R>,
+	{
+		#[pin]
+		future: tower::util::Oneshot<S, R>,
+	}
 }
 
 impl<S, R> std::future::Future for TowerToHyperServiceFuture<S, R>
 where
-    S: tower::Service<R>,
-    S::Error: Into<BoxError> + 'static,
+	S: tower::Service<R>,
+	S::Error: Into<BoxError> + 'static,
 {
-    type Output = Result<S::Response, BoxError>;
+	type Output = Result<S::Response, BoxError>;
 
-    #[inline]
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        self.project().future.poll(cx).map_err(Into::into)
-    }
+	#[inline]
+	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+		self.project().future.poll(cx).map_err(Into::into)
+	}
 }

@@ -29,118 +29,107 @@ use crate::proxy::Proxy;
 // Proxy factory creates ztunnel proxies using a socket factory.
 // this allows us to create our proxies the same way in regular mode and in inpod mode.
 pub struct ProxyFactory {
-    config: Arc<config::Config>,
-    state: DemandProxyState,
-    cert_manager: Arc<SecretManager>,
-    proxy_metrics: Arc<Metrics>,
-    dns_metrics: Option<Arc<dns::Metrics>>,
-    drain: DrainWatcher,
+	config: Arc<config::Config>,
+	state: DemandProxyState,
+	cert_manager: Arc<SecretManager>,
+	proxy_metrics: Arc<Metrics>,
+	dns_metrics: Option<Arc<dns::Metrics>>,
+	drain: DrainWatcher,
 }
 
 impl ProxyFactory {
-    pub fn new(
-        config: Arc<config::Config>,
-        state: DemandProxyState,
-        cert_manager: Arc<SecretManager>,
-        proxy_metrics: Arc<Metrics>,
-        dns_metrics: Option<dns::Metrics>,
-        drain: DrainWatcher,
-    ) -> std::io::Result<Self> {
-        let dns_metrics = match dns_metrics {
-            Some(metrics) => Some(Arc::new(metrics)),
-            None => {
-                if config.dns_proxy {
-                    error!("dns proxy configured but no dns metrics provided")
-                }
-                None
-            }
-        };
+	pub fn new(
+		config: Arc<config::Config>,
+		state: DemandProxyState,
+		cert_manager: Arc<SecretManager>,
+		proxy_metrics: Arc<Metrics>,
+		dns_metrics: Option<dns::Metrics>,
+		drain: DrainWatcher,
+	) -> std::io::Result<Self> {
+		let dns_metrics = match dns_metrics {
+			Some(metrics) => Some(Arc::new(metrics)),
+			None => {
+				if config.dns_proxy {
+					error!("dns proxy configured but no dns metrics provided")
+				}
+				None
+			}
+		};
 
-        Ok(ProxyFactory {
-            config,
-            state,
-            cert_manager,
-            proxy_metrics,
-            dns_metrics,
-            drain,
-        })
-    }
+		Ok(ProxyFactory { config, state, cert_manager, proxy_metrics, dns_metrics, drain })
+	}
 
-    pub async fn new_proxies_for_dedicated(
-        &self,
-        proxy_workload_info: WorkloadInfo,
-    ) -> Result<ProxyResult, Error> {
-        let factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync> =
-            if let Some(mark) = self.config.packet_mark {
-                Arc::new(crate::proxy::MarkSocketFactory(mark))
-            } else {
-                Arc::new(crate::proxy::DefaultSocketFactory)
-            };
-        self.new_proxies_from_factory(None, proxy_workload_info, factory)
-            .await
-    }
+	pub async fn new_proxies_for_dedicated(&self, proxy_workload_info: WorkloadInfo) -> Result<ProxyResult, Error> {
+		let factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync> = if let Some(mark) = self.config.packet_mark {
+			Arc::new(crate::proxy::MarkSocketFactory(mark))
+		} else {
+			Arc::new(crate::proxy::DefaultSocketFactory)
+		};
+		self.new_proxies_from_factory(None, proxy_workload_info, factory)
+			.await
+	}
 
-    pub async fn new_proxies_from_factory(
-        &self,
-        proxy_drain: Option<DrainWatcher>,
-        proxy_workload_info: WorkloadInfo,
-        socket_factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync>,
-    ) -> Result<ProxyResult, Error> {
-        let mut result: ProxyResult = Default::default();
-        let drain = proxy_drain.unwrap_or_else(|| self.drain.clone());
+	pub async fn new_proxies_from_factory(
+		&self,
+		proxy_drain: Option<DrainWatcher>,
+		proxy_workload_info: WorkloadInfo,
+		socket_factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync>,
+	) -> Result<ProxyResult, Error> {
+		let mut result: ProxyResult = Default::default();
+		let drain = proxy_drain.unwrap_or_else(|| self.drain.clone());
 
-        let mut resolver = None;
+		let mut resolver = None;
 
-        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
-            Arc::new(proxy_workload_info),
-            self.state.clone(),
-            self.cert_manager.clone(),
-        ));
+		let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+			Arc::new(proxy_workload_info),
+			self.state.clone(),
+			self.cert_manager.clone(),
+		));
 
-        // Optionally create the DNS proxy.
-        if self.config.dns_proxy {
-            let server = dns::Server::new(
-                self.config.cluster_domain.clone(),
-                self.config.dns_proxy_addr,
-                self.state.clone(),
-                dns::forwarder_for_mode(
-                    self.config.proxy_mode,
-                    self.config.cluster_domain.clone(),
-                    socket_factory.clone(),
-                )?,
-                self.dns_metrics.clone().unwrap(),
-                drain.clone(),
-                socket_factory.as_ref(),
-                local_workload_information.as_fetcher(),
-            )
-            .await?;
-            resolver = Some(server.resolver());
-            result.dns_proxy = Some(server);
-        }
+		// Optionally create the DNS proxy.
+		if self.config.dns_proxy {
+			let server = dns::Server::new(
+				self.config.cluster_domain.clone(),
+				self.config.dns_proxy_addr,
+				self.state.clone(),
+				dns::forwarder_for_mode(
+					self.config.proxy_mode,
+					self.config.cluster_domain.clone(),
+					socket_factory.clone(),
+				)?,
+				self.dns_metrics.clone().unwrap(),
+				drain.clone(),
+				socket_factory.as_ref(),
+				local_workload_information.as_fetcher(),
+			)
+			.await?;
+			resolver = Some(server.resolver());
+			result.dns_proxy = Some(server);
+		}
 
-        // Optionally create the HBONE proxy.
-        if self.config.proxy {
-            let cm = ConnectionManager::default();
-            let pi = crate::proxy::ProxyInputs::new(
-                self.config.clone(),
-                cm.clone(),
-                self.state.clone(),
-                self.proxy_metrics.clone(),
-                socket_factory.clone(),
-                resolver,
-                local_workload_information,
-            );
-            result.connection_manager = Some(cm);
-            result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
-        }
+		// Optionally create the HBONE proxy.
+		if self.config.proxy {
+			let cm = ConnectionManager::default();
+			let pi = crate::proxy::ProxyInputs::new(
+				self.config.clone(),
+				cm.clone(),
+				self.state.clone(),
+				self.proxy_metrics.clone(),
+				socket_factory.clone(),
+				resolver,
+				local_workload_information,
+			);
+			result.connection_manager = Some(cm);
+			result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
+		}
 
-        Ok(result)
-    }
+		Ok(result)
+	}
 }
 
 #[derive(Default)]
 pub struct ProxyResult {
-    pub proxy: Option<Proxy>,
-    pub dns_proxy: Option<dns::Server>,
-    pub connection_manager: Option<ConnectionManager>,
+	pub proxy: Option<Proxy>,
+	pub dns_proxy: Option<dns::Server>,
+	pub connection_manager: Option<ConnectionManager>,
 }

@@ -52,338 +52,310 @@ const TTL: u32 = 5;
 
 /// A short-hand helper for constructing a [Name].
 pub fn n<S: AsRef<str>>(name: S) -> Name {
-    Name::from_utf8(name).unwrap()
+	Name::from_utf8(name).unwrap()
 }
 
 /// Creates an A record for the name and IP.
 pub fn a(name: Name, addr: Ipv4Addr) -> Record {
-    Record::from_rdata(name, TTL, RData::A(A(addr)))
+	Record::from_rdata(name, TTL, RData::A(A(addr)))
 }
 
 /// Creates an AAAA record for the name and IP.
 pub fn aaaa(name: Name, addr: Ipv6Addr) -> Record {
-    Record::from_rdata(name, TTL, RData::AAAA(AAAA(addr)))
+	Record::from_rdata(name, TTL, RData::AAAA(AAAA(addr)))
 }
 
 /// Creates a CNAME record for the given canonical name.
 pub fn cname(name: Name, canonical_name: Name) -> Record {
-    Record::from_rdata(name, TTL, RData::CNAME(CNAME(canonical_name)))
+	Record::from_rdata(name, TTL, RData::CNAME(CNAME(canonical_name)))
 }
 
 /// Creates a new DNS client that establishes a TCP connection to the nameserver at the given
 /// address.
 pub async fn new_tcp_client(addr: SocketAddr) -> AsyncClient {
-    let (stream, sender) = TcpClientStream::<AsyncIoTokioAsStd<TcpStream>>::new(addr);
-    let (client, bg) = AsyncClient::new(Box::new(stream), sender, None)
-        .await
-        .unwrap();
+	let (stream, sender) = TcpClientStream::<AsyncIoTokioAsStd<TcpStream>>::new(addr);
+	let (client, bg) = AsyncClient::new(Box::new(stream), sender, None)
+		.await
+		.unwrap();
 
-    // Run the client exchange in the background.
-    tokio::spawn(bg);
+	// Run the client exchange in the background.
+	tokio::spawn(bg);
 
-    client
+	client
 }
 
 /// Creates a new DNS client that establishes a UDP connection to the nameserver at the given address.
 pub async fn new_udp_client(addr: SocketAddr) -> AsyncClient {
-    let stream = UdpClientStream::<UdpSocket>::new(addr);
-    let (client, bg) = AsyncClient::connect(stream).await.unwrap();
+	let stream = UdpClientStream::<UdpSocket>::new(addr);
+	let (client, bg) = AsyncClient::connect(stream).await.unwrap();
 
-    // Run the client exchange in the background.
-    tokio::spawn(bg);
+	// Run the client exchange in the background.
+	tokio::spawn(bg);
 
-    client
+	client
 }
 
 /// Sends a request via the client.
-pub async fn send_request<C: ClientHandle>(
-    client: &mut C,
-    name: Name,
-    rr_type: RecordType,
-) -> DnsResponse {
-    client.query(name, DNSClass::IN, rr_type).await.unwrap()
+pub async fn send_request<C: ClientHandle>(client: &mut C, name: Name, rr_type: RecordType) -> DnsResponse {
+	client.query(name, DNSClass::IN, rr_type).await.unwrap()
 }
 
 /// Sends a request with the given maximum response payload size.
 pub async fn send_with_max_size(
-    client: &mut AsyncClient,
-    name: Name,
-    rr_type: RecordType,
-    max_payload: u16,
+	client: &mut AsyncClient,
+	name: Name,
+	rr_type: RecordType,
+	max_payload: u16,
 ) -> DnsResponse {
-    // Build the request message.
-    let mut message: Message = Message::new();
-    message
-        .add_query({
-            let mut query = Query::query(name, rr_type);
-            query.set_query_class(DNSClass::IN);
-            query
-        })
-        .set_id(rand::random::<u16>())
-        .set_message_type(MessageType::Query)
-        .set_op_code(OpCode::Query)
-        .set_recursion_desired(true)
-        .set_edns({
-            let mut edns = Edns::new();
-            edns.set_max_payload(max_payload).set_version(0);
-            edns
-        });
+	// Build the request message.
+	let mut message: Message = Message::new();
+	message
+		.add_query({
+			let mut query = Query::query(name, rr_type);
+			query.set_query_class(DNSClass::IN);
+			query
+		})
+		.set_id(rand::random::<u16>())
+		.set_message_type(MessageType::Query)
+		.set_op_code(OpCode::Query)
+		.set_recursion_desired(true)
+		.set_edns({
+			let mut edns = Edns::new();
+			edns.set_max_payload(max_payload).set_version(0);
+			edns
+		});
 
-    // client.send(message).first_answer().await.unwrap()
+	// client.send(message).first_answer().await.unwrap()
 
-    let mut options = DnsRequestOptions::default();
-    options.use_edns = true;
-    ClientResponse(client.send(DnsRequest::new(message, options)))
-        .await
-        .unwrap()
+	let mut options = DnsRequestOptions::default();
+	options.use_edns = true;
+	ClientResponse(client.send(DnsRequest::new(message, options)))
+		.await
+		.unwrap()
 }
 
 /// Copied from Trust-DNS async_client code to allow construction here.
 struct ClientResponse<R>(pub(crate) R)
 where
-    R: Stream<Item = Result<DnsResponse, ProtoError>> + Send + Unpin + 'static;
+	R: Stream<Item = Result<DnsResponse, ProtoError>> + Send + Unpin + 'static;
 
 impl<R> Future for ClientResponse<R>
 where
-    R: Stream<Item = Result<DnsResponse, ProtoError>> + Send + Unpin + 'static,
+	R: Stream<Item = Result<DnsResponse, ProtoError>> + Send + Unpin + 'static,
 {
-    type Output = Result<DnsResponse, ClientError>;
+	type Output = Result<DnsResponse, ClientError>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Poll::Ready(
-            match ready!(self.0.poll_next_unpin(cx)) {
-                Some(r) => r,
-                None => Err(ProtoError::from(ProtoErrorKind::Timeout)),
-            }
-            .map_err(ClientError::from),
-        )
-    }
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		Poll::Ready(
+			match ready!(self.0.poll_next_unpin(cx)) {
+				Some(r) => r,
+				None => Err(ProtoError::from(ProtoErrorKind::Timeout)),
+			}
+			.map_err(ClientError::from),
+		)
+	}
 }
 
 /// Constructs a new [Message] of type [MessageType::Query];
 pub fn new_message(name: Name, rr_type: RecordType) -> Message {
-    let mut msg = Message::new();
-    msg.set_id(123);
-    msg.set_message_type(MessageType::Query);
-    msg.set_recursion_desired(true);
-    msg.add_query(Query::query(name, rr_type));
-    msg
+	let mut msg = Message::new();
+	msg.set_id(123);
+	msg.set_message_type(MessageType::Query);
+	msg.set_recursion_desired(true);
+	msg.add_query(Query::query(name, rr_type));
+	msg
 }
 
 /// Converts the given [Message] into a server-side [Request] with dummy values for
 /// the client IP and protocol.
 pub fn server_request(msg: &Message, client_addr: SocketAddr, protocol: Protocol) -> Request {
-    // Serialize the message.
-    let wire_bytes = msg.to_vec().unwrap();
+	// Serialize the message.
+	let wire_bytes = msg.to_vec().unwrap();
 
-    // Deserialize into a server-side request.
-    let msg_request = MessageRequest::from_bytes(&wire_bytes).unwrap();
+	// Deserialize into a server-side request.
+	let msg_request = MessageRequest::from_bytes(&wire_bytes).unwrap();
 
-    Request::new(msg_request, client_addr, protocol)
+	Request::new(msg_request, client_addr, protocol)
 }
 
 /// Creates a A-record [Request] for the given name.
 pub fn a_request(name: Name, client_addr: SocketAddr, protocol: Protocol) -> Request {
-    server_request(&new_message(name, RecordType::A), client_addr, protocol)
+	server_request(&new_message(name, RecordType::A), client_addr, protocol)
 }
 
 /// Creates a AAAA-record [Request] for the given name.
 pub fn aaaa_request(name: Name, client_addr: SocketAddr, protocol: Protocol) -> Request {
-    server_request(&new_message(name, RecordType::AAAA), client_addr, protocol)
+	server_request(&new_message(name, RecordType::AAAA), client_addr, protocol)
 }
 
 /// Helper for parsing a [SocketAddr] string.
 pub fn socket_addr<S: AsRef<str>>(socket_addr: S) -> SocketAddr {
-    socket_addr.as_ref().parse().unwrap()
+	socket_addr.as_ref().parse().unwrap()
 }
 
 /// Helper for parsing a [IpAddr] string.
 pub fn ip<S: AsRef<str>>(addr: S) -> IpAddr {
-    addr.as_ref().parse().unwrap()
+	addr.as_ref().parse().unwrap()
 }
 
 /// Helper for parsing a [Ipv4Addr] string.
 pub fn ipv4<S: AsRef<str>>(addr: S) -> Ipv4Addr {
-    addr.as_ref().parse().unwrap()
+	addr.as_ref().parse().unwrap()
 }
 
 /// Helper for parsing a [Ipv6Addr] string.
 pub fn ipv6<S: AsRef<str>>(addr: S) -> Ipv6Addr {
-    addr.as_ref().parse().unwrap()
+	addr.as_ref().parse().unwrap()
 }
 
 pub struct TestDnsServer {
-    tcp: SocketAddr,
-    udp: SocketAddr,
-    resolver: Arc<dyn Resolver>,
-    _drain: DrainTrigger,
+	tcp: SocketAddr,
+	udp: SocketAddr,
+	resolver: Arc<dyn Resolver>,
+	_drain: DrainTrigger,
 }
 
 impl TestDnsServer {
-    /// resolver_config gets a config that can be passed to Ztunnel to make this the resolver
-    pub fn resolver_config(&self) -> ResolverConfig {
-        internal_resolver_config(self.tcp, self.udp)
-    }
+	/// resolver_config gets a config that can be passed to Ztunnel to make this the resolver
+	pub fn resolver_config(&self) -> ResolverConfig {
+		internal_resolver_config(self.tcp, self.udp)
+	}
 }
 
 fn internal_resolver_config(tcp: SocketAddr, udp: SocketAddr) -> ResolverConfig {
-    let mut rc = ResolverConfig::new();
-    rc.add_name_server(NameServerConfig {
-        socket_addr: udp,
-        protocol: hickory_resolver::config::Protocol::Udp,
-        tls_dns_name: None,
-        trust_negative_responses: false,
-        bind_addr: None,
-    });
-    rc.add_name_server(NameServerConfig {
-        socket_addr: tcp,
-        protocol: hickory_resolver::config::Protocol::Tcp,
-        tls_dns_name: None,
-        trust_negative_responses: false,
-        bind_addr: None,
-    });
-    rc
+	let mut rc = ResolverConfig::new();
+	rc.add_name_server(NameServerConfig {
+		socket_addr: udp,
+		protocol: hickory_resolver::config::Protocol::Udp,
+		tls_dns_name: None,
+		trust_negative_responses: false,
+		bind_addr: None,
+	});
+	rc.add_name_server(NameServerConfig {
+		socket_addr: tcp,
+		protocol: hickory_resolver::config::Protocol::Tcp,
+		tls_dns_name: None,
+		trust_negative_responses: false,
+		bind_addr: None,
+	});
+	rc
 }
 
 // run_dns sets up a test DNS server. We happen to have a DNS server implementation, so we abuse that here.
 pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<TestDnsServer> {
-    let test_metrics = {
-        let mut registry = Registry::default();
-        let istio_registry = metrics::sub_registry(&mut registry);
-        Arc::new(Metrics::new(istio_registry))
-    };
-    let (signal, drain) = drain::new();
-    let factory = crate::proxy::DefaultSocketFactory {};
+	let test_metrics = {
+		let mut registry = Registry::default();
+		let istio_registry = metrics::sub_registry(&mut registry);
+		Arc::new(Metrics::new(istio_registry))
+	};
+	let (signal, drain) = drain::new();
+	let factory = crate::proxy::DefaultSocketFactory {};
 
-    let state = new_proxy_state(
-        &[XdsWorkload {
-            uid: "local".to_string(),
-            name: "local".to_string(),
-            namespace: "ns".to_string(),
-            ..Default::default()
-        }],
-        &[],
-        &[],
-    );
-    let forwarder = Arc::new(FakeForwarder {
-        // Use the standard search domains for Kubernetes.
-        search_domains: vec![
-            n("ns1.svc.cluster.local"),
-            n("svc.cluster.local"),
-            n("cluster.local"),
-        ],
-        ips: responses,
-    });
-    let srv = crate::dns::Server::new(
-        "example.com".to_string(),
-        Address::Localhost(false, 0),
-        state.clone(),
-        forwarder,
-        test_metrics,
-        drain,
-        &factory,
-        crate::proxy::LocalWorkloadFetcher::new(
-            Arc::new(WorkloadInfo {
-                name: "local".to_string(),
-                namespace: "ns".to_string(),
-                service_account: "default".to_string(),
-            }),
-            state.clone(),
-        ),
-    )
-    .await?;
+	let state = new_proxy_state(
+		&[XdsWorkload {
+			uid: "local".to_string(),
+			name: "local".to_string(),
+			namespace: "ns".to_string(),
+			..Default::default()
+		}],
+		&[],
+		&[],
+	);
+	let forwarder = Arc::new(FakeForwarder {
+		// Use the standard search domains for Kubernetes.
+		search_domains: vec![n("ns1.svc.cluster.local"), n("svc.cluster.local"), n("cluster.local")],
+		ips: responses,
+	});
+	let srv = crate::dns::Server::new(
+		"example.com".to_string(),
+		Address::Localhost(false, 0),
+		state.clone(),
+		forwarder,
+		test_metrics,
+		drain,
+		&factory,
+		crate::proxy::LocalWorkloadFetcher::new(
+			Arc::new(WorkloadInfo {
+				name: "local".to_string(),
+				namespace: "ns".to_string(),
+				service_account: "default".to_string(),
+			}),
+			state.clone(),
+		),
+	)
+	.await?;
 
-    let tcp = srv.tcp_address();
-    let udp = srv.udp_address();
-    tokio::spawn(srv.run());
-    let cfg = internal_resolver_config(tcp, udp);
-    let opts = ResolverOpts::default();
-    let resolver = Arc::new(
-        dns::forwarder::Forwarder::new(cfg, Arc::new(DefaultSocketFactory), opts)
-            .map_err(|e| Error::Generic(Box::new(e)))?,
-    );
-    Ok(TestDnsServer {
-        tcp,
-        udp,
-        resolver,
-        _drain: signal,
-    })
+	let tcp = srv.tcp_address();
+	let udp = srv.udp_address();
+	tokio::spawn(srv.run());
+	let cfg = internal_resolver_config(tcp, udp);
+	let opts = ResolverOpts::default();
+	let resolver = Arc::new(
+		dns::forwarder::Forwarder::new(cfg, Arc::new(DefaultSocketFactory), opts)
+			.map_err(|e| Error::Generic(Box::new(e)))?,
+	);
+	Ok(TestDnsServer { tcp, udp, resolver, _drain: signal })
 }
 
 // Implement a Forwarder that sends a request to our server. This is used for testing the DNS server itself.
 // This is somewhat recursive. `Server --this Forwarder--> Server --FakeForwarder--> Mock`
 #[async_trait::async_trait]
 impl crate::dns::Forwarder for TestDnsServer {
-    fn search_domains(&self, _: &Workload) -> Vec<Name> {
-        vec![
-            n("ns1.svc.cluster.local"),
-            n("svc.cluster.local"),
-            n("cluster.local"),
-        ]
-    }
+	fn search_domains(&self, _: &Workload) -> Vec<Name> {
+		vec![n("ns1.svc.cluster.local"), n("svc.cluster.local"), n("cluster.local")]
+	}
 
-    async fn forward(
-        &self,
-        _: Option<&Workload>,
-        request: &Request,
-    ) -> Result<Answer, LookupError> {
-        self.resolver.lookup(request).await
-    }
+	async fn forward(&self, _: Option<&Workload>, request: &Request) -> Result<Answer, LookupError> {
+		self.resolver.lookup(request).await
+	}
 }
 #[async_trait::async_trait]
 impl Resolver for TestDnsServer {
-    async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
-        self.resolver.lookup(request).await
-    }
+	async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
+		self.resolver.lookup(request).await
+	}
 }
 
 struct FakeForwarder {
-    search_domains: Vec<Name>,
-    ips: HashMap<Name, Vec<IpAddr>>,
+	search_domains: Vec<Name>,
+	ips: HashMap<Name, Vec<IpAddr>>,
 }
 
 #[async_trait::async_trait]
 impl crate::dns::Forwarder for FakeForwarder {
-    fn search_domains(&self, _: &Workload) -> Vec<Name> {
-        self.search_domains.clone()
-    }
+	fn search_domains(&self, _: &Workload) -> Vec<Name> {
+		self.search_domains.clone()
+	}
 
-    async fn forward(
-        &self,
-        _: Option<&Workload>,
-        request: &Request,
-    ) -> Result<Answer, LookupError> {
-        let name: Name = request.query().name().into();
-        let utf = name.to_string();
-        if let Some(ip) = utf.strip_suffix(".reflect.internal.") {
-            // Magic to allow `ip.reflect.internal` to always return ip (like nip.io)
-            return Ok(Answer::new(
-                vec![a(request.query().name().into(), ip.parse().unwrap())],
-                false,
-            ));
-        }
-        let Some(ips) = self.ips.get(&name) else {
-            // Not found.
-            return Err(LookupError::ResponseCode(ResponseCode::NXDomain));
-        };
+	async fn forward(&self, _: Option<&Workload>, request: &Request) -> Result<Answer, LookupError> {
+		let name: Name = request.query().name().into();
+		let utf = name.to_string();
+		if let Some(ip) = utf.strip_suffix(".reflect.internal.") {
+			// Magic to allow `ip.reflect.internal` to always return ip (like nip.io)
+			return Ok(Answer::new(vec![a(request.query().name().into(), ip.parse().unwrap())], false));
+		}
+		let Some(ips) = self.ips.get(&name) else {
+			// Not found.
+			return Err(LookupError::ResponseCode(ResponseCode::NXDomain));
+		};
 
-        let mut out = Vec::new();
-        let rtype = request.query().query_type();
-        for ip in ips {
-            match ip {
-                IpAddr::V4(ip) => {
-                    if rtype == RecordType::A {
-                        out.push(a(request.query().name().into(), *ip));
-                    }
-                }
-                IpAddr::V6(ip) => {
-                    if rtype == RecordType::AAAA {
-                        out.push(aaaa(request.query().name().into(), *ip));
-                    }
-                }
-            }
-        }
+		let mut out = Vec::new();
+		let rtype = request.query().query_type();
+		for ip in ips {
+			match ip {
+				IpAddr::V4(ip) => {
+					if rtype == RecordType::A {
+						out.push(a(request.query().name().into(), *ip));
+					}
+				}
+				IpAddr::V6(ip) => {
+					if rtype == RecordType::AAAA {
+						out.push(aaaa(request.query().name().into(), *ip));
+					}
+				}
+			}
+		}
 
-        return Ok(Answer::new(out, false));
-    }
+		return Ok(Answer::new(out, false));
+	}
 }

@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::inpod::test_helpers::{
-    read_hello, read_msg, send_snap_sent, send_workload_added, send_workload_del,
-};
+use crate::inpod::test_helpers::{read_hello, read_msg, send_snap_sent, send_workload_added, send_workload_del};
 
 use crate::inpod::istio::zds::WorkloadInfo;
 use crate::test_helpers;
@@ -25,83 +23,64 @@ use tracing::info;
 
 #[derive(Debug)]
 pub struct StartZtunnelMessage {
-    pub uid: String,
-    pub workload_info: Option<WorkloadInfo>,
-    pub fd: i32,
+	pub uid: String,
+	pub workload_info: Option<WorkloadInfo>,
+	pub fd: i32,
 }
 
-pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
-    bind_path: P,
-) -> MpscAckSender<StartZtunnelMessage> {
-    info!("starting server {}", bind_path.as_ref().display());
+pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(bind_path: P) -> MpscAckSender<StartZtunnelMessage> {
+	info!("starting server {}", bind_path.as_ref().display());
 
-    // remove file if exists
-    if bind_path.as_ref().exists() {
-        info!(
-            "removing existing server socket file {}",
-            bind_path.as_ref().display()
-        );
-        std::fs::remove_file(&bind_path).expect("remove file failed");
-    }
-    let (tx, mut rx) = test_helpers::mpsc_ack::<StartZtunnelMessage>(1);
+	// remove file if exists
+	if bind_path.as_ref().exists() {
+		info!("removing existing server socket file {}", bind_path.as_ref().display());
+		std::fs::remove_file(&bind_path).expect("remove file failed");
+	}
+	let (tx, mut rx) = test_helpers::mpsc_ack::<StartZtunnelMessage>(1);
 
-    // these tests are structured in an unusual way - async operations are done in a different thread,
-    // that is joined. This blocks asyncs done here. thus the need run the servers in a different thread
-    info!("spawning server {}", bind_path.as_ref().display());
-    std::thread::spawn(move || {
-        info!("starting server thread {}", bind_path.as_ref().display());
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async move {
-            let listener = crate::inpod::packet::bind(bind_path.as_ref()).expect("bind failed");
-            info!(
-                "waiting for connection from ztunnel server {}",
-                bind_path.as_ref().display()
-            );
-            let (mut ztun_sock, _) = listener.accept().await.expect("accept failed");
-            info!(
-                "accepted connection from ztunnel server {}",
-                bind_path.as_ref().display()
-            );
+	// these tests are structured in an unusual way - async operations are done in a different thread,
+	// that is joined. This blocks asyncs done here. thus the need run the servers in a different thread
+	info!("spawning server {}", bind_path.as_ref().display());
+	std::thread::spawn(move || {
+		info!("starting server thread {}", bind_path.as_ref().display());
+		let rt = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		rt.block_on(async move {
+			let listener = crate::inpod::packet::bind(bind_path.as_ref()).expect("bind failed");
+			info!("waiting for connection from ztunnel server {}", bind_path.as_ref().display());
+			let (mut ztun_sock, _) = listener.accept().await.expect("accept failed");
+			info!("accepted connection from ztunnel server {}", bind_path.as_ref().display());
 
-            // read the hello message:
-            let hello = read_hello(&mut ztun_sock).await;
-            info!("hello received, {:?}", hello);
+			// read the hello message:
+			let hello = read_hello(&mut ztun_sock).await;
+			info!("hello received, {:?}", hello);
 
-            // send snapshot done msg:
-            send_snap_sent(&mut ztun_sock).await;
-            info!(
-                "initial snapshot sent from ztun server {}",
-                bind_path.as_ref().display()
-            );
+			// send snapshot done msg:
+			send_snap_sent(&mut ztun_sock).await;
+			info!("initial snapshot sent from ztun server {}", bind_path.as_ref().display());
 
-            // receive ack from ztunnel
-            let mut buf: [u8; 100] = [0u8; 100];
-            let read_amount = ztun_sock.read(&mut buf).await.unwrap();
-            info!("ack received, len {}", read_amount);
-            // Now await for FDs
-            while let Some(StartZtunnelMessage {
-                uid,
-                fd,
-                workload_info,
-            }) = rx.recv().await
-            {
-                let orig_uid = uid.clone();
-                let uid = crate::inpod::WorkloadUid::new(uid);
-                if fd >= 0 {
-                    send_workload_added(&mut ztun_sock, uid, workload_info, fd).await;
-                } else {
-                    send_workload_del(&mut ztun_sock, uid).await;
-                };
+			// receive ack from ztunnel
+			let mut buf: [u8; 100] = [0u8; 100];
+			let read_amount = ztun_sock.read(&mut buf).await.unwrap();
+			info!("ack received, len {}", read_amount);
+			// Now await for FDs
+			while let Some(StartZtunnelMessage { uid, fd, workload_info }) = rx.recv().await {
+				let orig_uid = uid.clone();
+				let uid = crate::inpod::WorkloadUid::new(uid);
+				if fd >= 0 {
+					send_workload_added(&mut ztun_sock, uid, workload_info, fd).await;
+				} else {
+					send_workload_del(&mut ztun_sock, uid).await;
+				};
 
-                // receive ack from ztunnel
-                let _ = read_msg(&mut ztun_sock).await;
-                info!(uid=orig_uid, %fd, "ack received");
-                rx.ack().await.expect("ack failed");
-            }
-        });
-    });
-    tx
+				// receive ack from ztunnel
+				let _ = read_msg(&mut ztun_sock).await;
+				info!(uid=orig_uid, %fd, "ack received");
+				rx.ack().await.expect("ack failed");
+			}
+		});
+	});
+	tx
 }

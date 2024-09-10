@@ -15,98 +15,88 @@
 use crate::tls::Error;
 
 pub struct CertSign {
-    pub csr: String,
-    pub private_key: Vec<u8>,
+	pub csr: String,
+	pub private_key: Vec<u8>,
 }
 
 pub struct CsrOptions {
-    pub san: String,
+	pub san: String,
 }
 
 impl CsrOptions {
-    #[cfg(feature = "tls-boring")]
-    pub fn generate(&self) -> Result<CertSign, Error> {
-        use boring::ec::{EcGroup, EcKey};
-        use boring::hash::MessageDigest;
-        use boring::nid::Nid;
-        use boring::pkey::PKey;
-        use boring::stack::Stack;
-        use boring::x509::extension::SubjectAlternativeName;
-        use boring::x509::{self};
-        // TODO: https://github.com/rustls/rcgen/issues/228 can we always use rcgen?
+	#[cfg(feature = "tls-boring")]
+	pub fn generate(&self) -> Result<CertSign, Error> {
+		use boring::ec::{EcGroup, EcKey};
+		use boring::hash::MessageDigest;
+		use boring::nid::Nid;
+		use boring::pkey::PKey;
+		use boring::stack::Stack;
+		use boring::x509::extension::SubjectAlternativeName;
+		use boring::x509::{self};
+		// TODO: https://github.com/rustls/rcgen/issues/228 can we always use rcgen?
 
-        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
-        let ec_key = EcKey::generate(&group)?;
-        let pkey = PKey::from_ec_key(ec_key)?;
+		let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
+		let ec_key = EcKey::generate(&group)?;
+		let pkey = PKey::from_ec_key(ec_key)?;
 
-        let mut csr = x509::X509ReqBuilder::new()?;
-        csr.set_pubkey(&pkey)?;
-        let mut extensions = Stack::new()?;
-        let subject_alternative_name = SubjectAlternativeName::new()
-            .uri(&self.san)
-            .critical()
-            .build(&csr.x509v3_context(None))?;
+		let mut csr = x509::X509ReqBuilder::new()?;
+		csr.set_pubkey(&pkey)?;
+		let mut extensions = Stack::new()?;
+		let subject_alternative_name = SubjectAlternativeName::new()
+			.uri(&self.san)
+			.critical()
+			.build(&csr.x509v3_context(None))?;
 
-        extensions.push(subject_alternative_name)?;
-        csr.add_extensions(&extensions)?;
-        csr.sign(&pkey, MessageDigest::sha256())?;
+		extensions.push(subject_alternative_name)?;
+		csr.add_extensions(&extensions)?;
+		csr.sign(&pkey, MessageDigest::sha256())?;
 
-        let csr = csr.build();
-        let pkey_pem = pkey.private_key_to_pem_pkcs8()?;
-        let csr_pem = csr.to_pem()?;
-        let csr_pem = std::str::from_utf8(&csr_pem)
-            .expect("CSR is valid string")
-            .to_string();
-        Ok(CertSign {
-            csr: csr_pem,
-            private_key: pkey_pem,
-        })
-    }
+		let csr = csr.build();
+		let pkey_pem = pkey.private_key_to_pem_pkcs8()?;
+		let csr_pem = csr.to_pem()?;
+		let csr_pem = std::str::from_utf8(&csr_pem)
+			.expect("CSR is valid string")
+			.to_string();
+		Ok(CertSign { csr: csr_pem, private_key: pkey_pem })
+	}
 
-    #[cfg(feature = "tls-ring")]
-    pub fn generate(&self) -> Result<CertSign, Error> {
-        use rcgen::{CertificateParams, DistinguishedName, SanType};
-        let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-        let private_key = kp.serialize_pem();
-        let mut params = CertificateParams::default();
-        params.subject_alt_names = vec![SanType::URI(self.san.clone().try_into()?)];
-        params.key_identifier_method = rcgen::KeyIdMethod::Sha256;
-        // Avoid setting CN. rcgen defaults it to "rcgen self signed cert" which we don't want
-        params.distinguished_name = DistinguishedName::new();
-        let csr = params.serialize_request(&kp)?.pem()?;
+	#[cfg(feature = "tls-ring")]
+	pub fn generate(&self) -> Result<CertSign, Error> {
+		use rcgen::{CertificateParams, DistinguishedName, SanType};
+		let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let private_key = kp.serialize_pem();
+		let mut params = CertificateParams::default();
+		params.subject_alt_names = vec![SanType::URI(self.san.clone().try_into()?)];
+		params.key_identifier_method = rcgen::KeyIdMethod::Sha256;
+		// Avoid setting CN. rcgen defaults it to "rcgen self signed cert" which we don't want
+		params.distinguished_name = DistinguishedName::new();
+		let csr = params.serialize_request(&kp)?.pem()?;
 
-        Ok(CertSign {
-            csr,
-            private_key: private_key.into(),
-        })
-    }
+		Ok(CertSign { csr, private_key: private_key.into() })
+	}
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::tls;
+	use crate::tls;
 
-    #[test]
-    fn test_csr() {
-        use x509_parser::prelude::FromDer;
-        let csr = tls::csr::CsrOptions {
-            san: "spiffe://td/ns/ns1/sa/sa1".to_string(),
-        }
-        .generate()
-        .unwrap();
-        let (_, der) = x509_parser::pem::parse_x509_pem(csr.csr.as_bytes()).unwrap();
+	#[test]
+	fn test_csr() {
+		use x509_parser::prelude::FromDer;
+		let csr = tls::csr::CsrOptions { san: "spiffe://td/ns/ns1/sa/sa1".to_string() }
+			.generate()
+			.unwrap();
+		let (_, der) = x509_parser::pem::parse_x509_pem(csr.csr.as_bytes()).unwrap();
 
-        let (_, cert) =
-            x509_parser::certification_request::X509CertificationRequest::from_der(&der.contents)
-                .unwrap();
-        cert.verify_signature().unwrap();
-        let attr = cert
-            .certification_request_info
-            .iter_attributes()
-            .next()
-            .unwrap();
-        // SAN is encoded in some format I don't understand how to parse; this could be improved.
-        // but make sure it's there in a hacky manner
-        assert!(attr.value.ends_with(b"spiffe://td/ns/ns1/sa/sa1"));
-    }
+		let (_, cert) = x509_parser::certification_request::X509CertificationRequest::from_der(&der.contents).unwrap();
+		cert.verify_signature().unwrap();
+		let attr = cert
+			.certification_request_info
+			.iter_attributes()
+			.next()
+			.unwrap();
+		// SAN is encoded in some format I don't understand how to parse; this could be improved.
+		// but make sure it's there in a hacky manner
+		assert!(attr.value.ends_with(b"spiffe://td/ns/ns1/sa/sa1"));
+	}
 }

@@ -27,58 +27,43 @@ use crate::drain::DrainWatcher;
 use crate::hyper_util;
 
 pub struct Server {
-    s: hyper_util::Server<Mutex<Registry>>,
+	s: hyper_util::Server<Mutex<Registry>>,
 }
 
 impl Server {
-    pub async fn new(
-        config: Arc<Config>,
-        drain_rx: DrainWatcher,
-        registry: Registry,
-    ) -> anyhow::Result<Self> {
-        hyper_util::Server::<Mutex<Registry>>::bind(
-            "stats",
-            config.stats_addr,
-            drain_rx,
-            Mutex::new(registry),
-        )
-        .await
-        .map(|s| Server { s })
-    }
+	pub async fn new(config: Arc<Config>, drain_rx: DrainWatcher, registry: Registry) -> anyhow::Result<Self> {
+		hyper_util::Server::<Mutex<Registry>>::bind("stats", config.stats_addr, drain_rx, Mutex::new(registry))
+			.await
+			.map(|s| Server { s })
+	}
 
-    pub fn address(&self) -> SocketAddr {
-        self.s.address()
-    }
+	pub fn address(&self) -> SocketAddr {
+		self.s.address()
+	}
 
-    pub fn spawn(self) {
-        self.s.spawn(|registry, req| async move {
-            match req.uri().path() {
-                "/metrics" | "/stats/prometheus" => Ok(handle_metrics(registry, req).await),
-                _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
-            }
-        })
-    }
+	pub fn spawn(self) {
+		self.s.spawn(|registry, req| async move {
+			match req.uri().path() {
+				"/metrics" | "/stats/prometheus" => Ok(handle_metrics(registry, req).await),
+				_ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
+			}
+		})
+	}
 }
 
-async fn handle_metrics(
-    reg: Arc<Mutex<Registry>>,
-    _req: Request<Incoming>,
-) -> Response<Full<Bytes>> {
-    let mut buf = String::new();
-    let reg = reg.lock().expect("mutex");
-    if let Err(err) = encode(&mut buf, &reg) {
-        return Response::builder()
-            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body(err.to_string().into())
-            .expect("builder with known status code should not fail");
-    }
+async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Incoming>) -> Response<Full<Bytes>> {
+	let mut buf = String::new();
+	let reg = reg.lock().expect("mutex");
+	if let Err(err) = encode(&mut buf, &reg) {
+		return Response::builder()
+			.status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+			.body(err.to_string().into())
+			.expect("builder with known status code should not fail");
+	}
 
-    Response::builder()
-        .status(hyper::StatusCode::OK)
-        .header(
-            hyper::header::CONTENT_TYPE,
-            "application/openmetrics-text;charset=utf-8;version=1.0.0",
-        )
-        .body(buf.into())
-        .expect("builder with known status code should not fail")
+	Response::builder()
+		.status(hyper::StatusCode::OK)
+		.header(hyper::header::CONTENT_TYPE, "application/openmetrics-text;charset=utf-8;version=1.0.0")
+		.body(buf.into())
+		.expect("builder with known status code should not fail")
 }

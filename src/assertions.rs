@@ -22,19 +22,13 @@
 
 #[cfg(all(any(test, feature = "testing"), debug_assertions))]
 pub fn size_between_ref<T>(min: usize, max: usize, t: &T) {
-    let size = std::mem::size_of_val(t);
-    if size < min || size > max {
-        // If it is too small: that is good, we just want to update the assertion to be more aggressive
-        // If it is too big: that is bad. We may need to increase the limit, or consider refactors.
-        panic!(
-            "type {} size is unexpected, wanted {min}..{max}, got {size}",
-            std::any::type_name::<T>(),
-        )
-    }
-    tracing::trace!(
-        "type {} size is within expectations, wanted {min}..{max}, got {size}",
-        std::any::type_name::<T>(),
-    )
+	let size = std::mem::size_of_val(t);
+	if size < min || size > max {
+		// If it is too small: that is good, we just want to update the assertion to be more aggressive
+		// If it is too big: that is bad. We may need to increase the limit, or consider refactors.
+		panic!("type {} size is unexpected, wanted {min}..{max}, got {size}", std::any::type_name::<T>(),)
+	}
+	tracing::trace!("type {} size is within expectations, wanted {min}..{max}, got {size}", std::any::type_name::<T>(),)
 }
 
 #[cfg(not(all(any(test, feature = "testing"), debug_assertions)))]
@@ -42,6 +36,6 @@ pub fn size_between_ref<T>(_min: usize, _max: usize, _t: &T) {}
 
 #[inline(always)]
 pub fn size_between<T>(min: usize, max: usize, t: T) -> T {
-    size_between_ref(min, max, &t);
-    t
+	size_between_ref(min, max, &t);
+	t
 }

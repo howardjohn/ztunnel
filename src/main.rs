@@ -29,49 +29,49 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 fn main() -> anyhow::Result<()> {
-    let _log_flush = telemetry::setup_logging();
-    let config = Arc::new(config::parse_config()?);
+	let _log_flush = telemetry::setup_logging();
+	let config = Arc::new(config::parse_config()?);
 
-    // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
-    match std::env::args().nth(1).as_deref() {
-        None | Some("proxy") => (),
-        Some("version") => return version(),
-        Some("help") => return help(),
-        Some(unknown) => {
-            eprintln!("unknown command: {unknown}");
-            help().unwrap();
-            std::process::exit(1)
-        }
-    };
+	// For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
+	match std::env::args().nth(1).as_deref() {
+		None | Some("proxy") => (),
+		Some("version") => return version(),
+		Some("help") => return help(),
+		Some(unknown) => {
+			eprintln!("unknown command: {unknown}");
+			help().unwrap();
+			std::process::exit(1)
+		}
+	};
 
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async move { proxy(config).await })
+	tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap()
+		.block_on(async move { proxy(config).await })
 }
 
 fn help() -> anyhow::Result<()> {
-    let version = version::BuildInfo::new();
-    println!(
-        "
+	let version = version::BuildInfo::new();
+	println!(
+		"
 Istio Ztunnel ({version})
 
 Commands:
 proxy (default) - Start the ztunnel proxy
 version         - Print the version of ztunnel
 help            - Print commands and version of ztunnel"
-    );
-    Ok(())
+	);
+	Ok(())
 }
 
 fn version() -> anyhow::Result<()> {
-    println!("{}", version::BuildInfo::new());
-    Ok(())
+	println!("{}", version::BuildInfo::new());
+	Ok(())
 }
 
 async fn proxy(cfg: Arc<config::Config>) -> anyhow::Result<()> {
-    info!("version: {}", version::BuildInfo::new());
-    info!("running with config: {}", serde_yaml::to_string(&cfg)?);
-    app::build(cfg).await?.wait_termination().await
+	info!("version: {}", version::BuildInfo::new());
+	info!("running with config: {}", serde_yaml::to_string(&cfg)?);
+	app::build(cfg).await?.wait_termination().await
 }

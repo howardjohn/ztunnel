@@ -21,49 +21,45 @@ use tonic::{Code, Request, Status};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthSource {
-    // JWT authentication source which contains the token file path and the cluster id.
-    Token(PathBuf, String),
-    None,
+	// JWT authentication source which contains the token file path and the cluster id.
+	Token(PathBuf, String),
+	None,
 }
 
 fn load_token(path: &PathBuf) -> io::Result<Vec<u8>> {
-    let t = std::fs::read(path)?;
+	let t = std::fs::read(path)?;
 
-    if t.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "token file exists, but was empty",
-        ));
-    }
-    Ok(t)
+	if t.is_empty() {
+		return Err(io::Error::new(io::ErrorKind::Other, "token file exists, but was empty"));
+	}
+	Ok(t)
 }
 
 impl Interceptor for AuthSource {
-    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        match self {
-            AuthSource::Token(path, cluster_id) => {
-                let token = load_token(path)
-                    .map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))
-                    .map(|mut t| {
-                        let mut bearer: Vec<u8> = b"Bearer ".to_vec();
-                        bearer.append(&mut t);
-                        bearer
-                    })
-                    .and_then(|b| {
-                        AsciiMetadataValue::try_from(b)
-                            .map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))
-                    })?;
+	fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+		match self {
+			AuthSource::Token(path, cluster_id) => {
+				let token = load_token(path)
+					.map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))
+					.map(|mut t| {
+						let mut bearer: Vec<u8> = b"Bearer ".to_vec();
+						bearer.append(&mut t);
+						bearer
+					})
+					.and_then(|b| {
+						AsciiMetadataValue::try_from(b).map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))
+					})?;
 
-                request.metadata_mut().insert("authorization", token);
-                if !cluster_id.is_empty() {
-                    let id = AsciiMetadataValue::try_from(cluster_id.as_bytes().to_vec())
-                        .map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))?;
-                    request.metadata_mut().insert("clusterid", id);
-                }
-            }
-            // When no token based authentication is required, do not load or insert the token.
-            AuthSource::None => {}
-        }
-        Ok(request)
-    }
+				request.metadata_mut().insert("authorization", token);
+				if !cluster_id.is_empty() {
+					let id = AsciiMetadataValue::try_from(cluster_id.as_bytes().to_vec())
+						.map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))?;
+					request.metadata_mut().insert("clusterid", id);
+				}
+			}
+			// When no token based authentication is required, do not load or insert the token.
+			AuthSource::None => {}
+		}
+		Ok(request)
+	}
 }

@@ -28,36 +28,34 @@ pub use auth::*;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod mock {
-    pub use super::caclient::mock::CaClient;
-    pub use super::manager::mock::{
-        new_secret_manager, new_secret_manager_cfg, Config as SecretManagerConfig,
-    };
+	pub use super::caclient::mock::CaClient;
+	pub use super::manager::mock::{new_secret_manager, new_secret_manager_cfg, Config as SecretManagerConfig};
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum Error {
-    #[error("failed to create CSR: {0}")]
-    Signing(Arc<tls::Error>),
-    #[error("signing gRPC error ({}): {}", .0.code(), .0.message())]
-    SigningRequest(#[from] tonic::Status),
-    #[error("failed to process string: {0}")]
-    Utf8(#[from] Utf8Error),
-    #[error("did not find expected SAN: {0}")]
-    SanError(Identity),
-    #[error("chain returned from CA is empty for: {0}")]
-    EmptyResponse(Identity),
-    #[error("invalid spiffe identity: {0}")]
-    Spiffe(String),
-    #[error("workload is unknown: {0}")]
-    UnknownWorkload(Arc<WorkloadInfo>),
-    #[error("the identity is no longer needed")]
-    Forgotten,
-    #[error("BUG: identity requested {0}, but only allowed {1:?}")]
-    BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
+	#[error("failed to create CSR: {0}")]
+	Signing(Arc<tls::Error>),
+	#[error("signing gRPC error ({}): {}", .0.code(), .0.message())]
+	SigningRequest(#[from] tonic::Status),
+	#[error("failed to process string: {0}")]
+	Utf8(#[from] Utf8Error),
+	#[error("did not find expected SAN: {0}")]
+	SanError(Identity),
+	#[error("chain returned from CA is empty for: {0}")]
+	EmptyResponse(Identity),
+	#[error("invalid spiffe identity: {0}")]
+	Spiffe(String),
+	#[error("workload is unknown: {0}")]
+	UnknownWorkload(Arc<WorkloadInfo>),
+	#[error("the identity is no longer needed")]
+	Forgotten,
+	#[error("BUG: identity requested {0}, but only allowed {1:?}")]
+	BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
 }
 
 impl From<tls::Error> for Error {
-    fn from(value: tls::Error) -> Self {
-        Error::Signing(Arc::new(value))
-    }
+	fn from(value: tls::Error) -> Self {
+		Error::Signing(Arc::new(value))
+	}
 }

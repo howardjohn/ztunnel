@@ -38,98 +38,89 @@ use crate::proxy::{util, Error, ProxyInputs, TraceParent};
 use crate::{assertions, socket};
 
 pub(super) struct Socks5 {
-    pi: Arc<ProxyInputs>,
-    listener: socket::Listener,
-    drain: DrainWatcher,
+	pi: Arc<ProxyInputs>,
+	listener: socket::Listener,
+	drain: DrainWatcher,
 }
 
 impl Socks5 {
-    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Socks5, Error> {
-        let listener = pi
-            .socket_factory
-            .tcp_bind(pi.cfg.socks5_addr.unwrap())
-            .map_err(|e| Error::Bind(pi.cfg.socks5_addr.unwrap(), e))?;
+	pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Socks5, Error> {
+		let listener = pi
+			.socket_factory
+			.tcp_bind(pi.cfg.socks5_addr.unwrap())
+			.map_err(|e| Error::Bind(pi.cfg.socks5_addr.unwrap(), e))?;
 
-        let transparent = super::maybe_set_transparent(&pi, &listener)?;
+		let transparent = super::maybe_set_transparent(&pi, &listener)?;
 
-        info!(
-            address=%listener.local_addr(),
-            component="socks5",
-            transparent,
-            "listener established",
-        );
+		info!(
+			address=%listener.local_addr(),
+			component="socks5",
+			transparent,
+			"listener established",
+		);
 
-        Ok(Socks5 {
-            pi,
-            listener,
-            drain,
-        })
-    }
+		Ok(Socks5 { pi, listener, drain })
+	}
 
-    pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr()
-    }
+	pub(super) fn address(&self) -> SocketAddr {
+		self.listener.local_addr()
+	}
 
-    pub async fn run(self) {
-        let pi = self.pi.clone();
-        let pool = crate::proxy::pool::WorkloadHBONEPool::new(
-            self.pi.cfg.clone(),
-            self.pi.socket_factory.clone(),
-            self.pi.local_workload_information.clone(),
-        );
-        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
-            async move {
-                loop {
-                    // Asynchronously wait for an inbound socket.
-                    let socket = self.listener.accept().await;
-                    let start = Instant::now();
-                    let drain = drain.clone();
-                    let mut force_shutdown = force_shutdown.clone();
-                    match socket {
-                        Ok((stream, _remote)) => {
-                            let oc = OutboundConnection {
-                                pi: self.pi.clone(),
-                                id: TraceParent::new(),
-                                pool: pool.clone(),
-                                hbone_port: self.pi.cfg.inbound_addr.port(),
-                            };
-                            let span = info_span!("socks5", id=%oc.id);
-                            let serve = (async move {
-                                debug!(component="socks5", "connection started");
-                                // Since this task is spawned, make sure we are guaranteed to terminate
-                                tokio::select! {
-                                    _ = force_shutdown.changed() => {
-                                        debug!(component="socks5", "connection forcefully terminated");
-                                    }
-                                    _ = handle(oc, stream) => {}
-                                }
-                                // Mark we are done with the connection, so drain can complete
-                                drop(drain);
-                                debug!(component="socks5", dur=?start.elapsed(), "connection completed");
-                            }).instrument(span);
+	pub async fn run(self) {
+		let pi = self.pi.clone();
+		let pool = crate::proxy::pool::WorkloadHBONEPool::new(
+			self.pi.cfg.clone(),
+			self.pi.socket_factory.clone(),
+			self.pi.local_workload_information.clone(),
+		);
+		let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+			async move {
+				loop {
+					// Asynchronously wait for an inbound socket.
+					let socket = self.listener.accept().await;
+					let start = Instant::now();
+					let drain = drain.clone();
+					let mut force_shutdown = force_shutdown.clone();
+					match socket {
+						Ok((stream, _remote)) => {
+							let oc = OutboundConnection {
+								pi: self.pi.clone(),
+								id: TraceParent::new(),
+								pool: pool.clone(),
+								hbone_port: self.pi.cfg.inbound_addr.port(),
+							};
+							let span = info_span!("socks5", id=%oc.id);
+							let serve = (async move {
+								debug!(component = "socks5", "connection started");
+								// Since this task is spawned, make sure we are guaranteed to terminate
+								tokio::select! {
+									_ = force_shutdown.changed() => {
+										debug!(component="socks5", "connection forcefully terminated");
+									}
+									_ = handle(oc, stream) => {}
+								}
+								// Mark we are done with the connection, so drain can complete
+								drop(drain);
+								debug!(component="socks5", dur=?start.elapsed(), "connection completed");
+							})
+							.instrument(span);
 
-                            assertions::size_between_ref(1000, 2000, &serve);
-                            tokio::spawn(serve);
-                        }
-                        Err(e) => {
-                            if util::is_runtime_shutdown(&e) {
-                                return;
-                            }
-                            error!("Failed TCP handshake {}", e);
-                        }
-                    }
-                }
-            }
-        };
+							assertions::size_between_ref(1000, 2000, &serve);
+							tokio::spawn(serve);
+						}
+						Err(e) => {
+							if util::is_runtime_shutdown(&e) {
+								return;
+							}
+							error!("Failed TCP handshake {}", e);
+						}
+					}
+				}
+			}
+		};
 
-        run_with_drain(
-            "socks5".to_string(),
-            self.drain,
-            pi.cfg.self_termination_deadline,
-            accept,
-        )
-        .await
-    }
+		run_with_drain("socks5".to_string(), self.drain, pi.cfg.self_termination_deadline, accept).await
+	}
 }
 
 // handle will process a SOCKS5 connection. This supports a minimal subset of the protocol,
@@ -137,161 +128,159 @@ impl Socks5 {
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6
 async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
-    let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
+	let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
 
-    // Version(5), Number of auth methods
-    let mut version = [0u8; 2];
-    stream.read_exact(&mut version).await?;
+	// Version(5), Number of auth methods
+	let mut version = [0u8; 2];
+	stream.read_exact(&mut version).await?;
 
-    if version[0] != 0x05 {
-        return Err(anyhow::anyhow!("Invalid version"));
-    }
+	if version[0] != 0x05 {
+		return Err(anyhow::anyhow!("Invalid version"));
+	}
 
-    let nmethods = version[1];
+	let nmethods = version[1];
 
-    if nmethods == 0 {
-        return Err(anyhow::anyhow!("Invalid auth methods"));
-    }
+	if nmethods == 0 {
+		return Err(anyhow::anyhow!("Invalid auth methods"));
+	}
 
-    // List of supported auth methods
-    let mut methods = vec![0u8; nmethods as usize];
-    stream.read_exact(&mut methods).await?;
+	// List of supported auth methods
+	let mut methods = vec![0u8; nmethods as usize];
+	stream.read_exact(&mut methods).await?;
 
-    // Client must include 'unauthenticated' (0).
-    if !methods.into_iter().any(|x| x == 0) {
-        return Err(anyhow::anyhow!("unsupported auth method"));
-    }
+	// Client must include 'unauthenticated' (0).
+	if !methods.into_iter().any(|x| x == 0) {
+		return Err(anyhow::anyhow!("unsupported auth method"));
+	}
 
-    // Select 'unauthenticated' (0).
-    stream.write_all(&[0x05, 0x00]).await?;
+	// Select 'unauthenticated' (0).
+	stream.write_all(&[0x05, 0x00]).await?;
 
-    // Version(5), Command - only support CONNECT (1)
-    let mut version_command = [0u8; 2];
-    stream.read_exact(&mut version_command).await?;
-    let version = version_command[0];
+	// Version(5), Command - only support CONNECT (1)
+	let mut version_command = [0u8; 2];
+	stream.read_exact(&mut version_command).await?;
+	let version = version_command[0];
 
-    if version != 0x05 {
-        return Err(anyhow::anyhow!("unsupported version"));
-    }
+	if version != 0x05 {
+		return Err(anyhow::anyhow!("unsupported version"));
+	}
 
-    if version_command[1] != 1 {
-        return Err(anyhow::anyhow!("unsupported command"));
-    }
+	if version_command[1] != 1 {
+		return Err(anyhow::anyhow!("unsupported command"));
+	}
 
-    // Skip RSV
-    stream.read_exact(&mut [0]).await?;
+	// Skip RSV
+	stream.read_exact(&mut [0]).await?;
 
-    // Address type
-    let mut atyp = [0u8];
-    stream.read_exact(&mut atyp).await?;
+	// Address type
+	let mut atyp = [0u8];
+	stream.read_exact(&mut atyp).await?;
 
-    let ip;
+	let ip;
 
-    match atyp[0] {
-        0x01 => {
-            let mut hostb = [0u8; 4];
-            stream.read_exact(&mut hostb).await?;
-            ip = IpAddr::V4(hostb.into());
-        }
-        0x04 => {
-            let mut hostb = [0u8; 16];
-            stream.read_exact(&mut hostb).await?;
-            ip = IpAddr::V6(hostb.into());
-        }
-        0x03 => {
-            let mut domain_length = [0u8];
-            stream.read_exact(&mut domain_length).await?;
-            let mut domain = vec![0u8; domain_length[0] as usize];
-            stream.read_exact(&mut domain).await?;
-            // TODO: DNS lookup, if we want to integrate with HTTP-based apps without
-            // a DNS server.
-            let ds = std::str::from_utf8(&domain)?;
-            let Some(resolver) = &oc.pi.resolver else {
-                return Err(anyhow::anyhow!(
-                    "unsupported hostname lookup, requires DNS enabled"
-                ));
-            };
+	match atyp[0] {
+		0x01 => {
+			let mut hostb = [0u8; 4];
+			stream.read_exact(&mut hostb).await?;
+			ip = IpAddr::V4(hostb.into());
+		}
+		0x04 => {
+			let mut hostb = [0u8; 16];
+			stream.read_exact(&mut hostb).await?;
+			ip = IpAddr::V6(hostb.into());
+		}
+		0x03 => {
+			let mut domain_length = [0u8];
+			stream.read_exact(&mut domain_length).await?;
+			let mut domain = vec![0u8; domain_length[0] as usize];
+			stream.read_exact(&mut domain).await?;
+			// TODO: DNS lookup, if we want to integrate with HTTP-based apps without
+			// a DNS server.
+			let ds = std::str::from_utf8(&domain)?;
+			let Some(resolver) = &oc.pi.resolver else {
+				return Err(anyhow::anyhow!("unsupported hostname lookup, requires DNS enabled"));
+			};
 
-            ip = dns_lookup(resolver.clone(), remote_addr, ds).await?;
-            // oc.pi.resolver.lookup()
-            // oc.pi.lookup_service_or_query(ds)
-            // return Err(anyhow::anyhow!("unsupported host {ds:?}"));
-        }
-        _ => {
-            return Err(anyhow::anyhow!("unsupported host"));
-        }
-    };
+			ip = dns_lookup(resolver.clone(), remote_addr, ds).await?;
+			// oc.pi.resolver.lookup()
+			// oc.pi.lookup_service_or_query(ds)
+			// return Err(anyhow::anyhow!("unsupported host {ds:?}"));
+		}
+		_ => {
+			return Err(anyhow::anyhow!("unsupported host"));
+		}
+	};
 
-    let mut port = [0u8; 2];
-    stream.read_exact(&mut port).await?;
-    let port = BigEndian::read_u16(&port);
+	let mut port = [0u8; 2];
+	stream.read_exact(&mut port).await?;
+	let port = BigEndian::read_u16(&port);
 
-    let host = SocketAddr::new(ip, port);
+	let host = SocketAddr::new(ip, port);
 
-    // Send dummy values - the client generally ignores it.
-    let buf = [
-        0x05u8, // version
-        // TODO: report appropriate error here. Unfortunately this needs to happen *after* we connect
-        // That is, we need to do this within proxy_to().
-        0x00, // Success.
-        0x00, // reserved
-        // Address. TODO: actually return the address instead of hardcoded 0.0.0.0
-        0x01, 0x00, 0x00, 0x00, 0x00, // Port. TODO: actually return the port
-        0x00, 0x00,
-    ];
-    stream.write_all(&buf).await?;
+	// Send dummy values - the client generally ignores it.
+	let buf = [
+		0x05u8, // version
+		// TODO: report appropriate error here. Unfortunately this needs to happen *after* we connect
+		// That is, we need to do this within proxy_to().
+		0x00, // Success.
+		0x00, // reserved
+		// Address. TODO: actually return the address instead of hardcoded 0.0.0.0
+		0x01, 0x00, 0x00, 0x00, 0x00, // Port. TODO: actually return the port
+		0x00, 0x00,
+	];
+	stream.write_all(&buf).await?;
 
-    debug!("accepted connection from {remote_addr} to {host}");
-    oc.proxy_to(stream, remote_addr, host).await;
-    Ok(())
+	debug!("accepted connection from {remote_addr} to {host}");
+	oc.proxy_to(stream, remote_addr, host).await;
+	Ok(())
 }
 
 async fn dns_lookup(
-    resolver: Arc<dyn Resolver + Send + Sync>,
-    client_addr: SocketAddr,
-    hostname: &str,
+	resolver: Arc<dyn Resolver + Send + Sync>,
+	client_addr: SocketAddr,
+	hostname: &str,
 ) -> Result<IpAddr, Error> {
-    fn new_message(name: Name, rr_type: RecordType) -> Message {
-        let mut msg = Message::new();
-        msg.set_id(rand::random());
-        msg.set_message_type(MessageType::Query);
-        msg.set_recursion_desired(true);
-        msg.add_query(Query::query(name, rr_type));
-        msg
-    }
-    /// Converts the given [Message] into a server-side [Request] with dummy values for
-    /// the client IP and protocol.
-    fn server_request(msg: &Message, client_addr: SocketAddr, protocol: Protocol) -> Request {
-        let wire_bytes = msg.to_vec().unwrap();
-        let msg_request = MessageRequest::from_bytes(&wire_bytes).unwrap();
-        Request::new(msg_request, client_addr, protocol)
-    }
+	fn new_message(name: Name, rr_type: RecordType) -> Message {
+		let mut msg = Message::new();
+		msg.set_id(rand::random());
+		msg.set_message_type(MessageType::Query);
+		msg.set_recursion_desired(true);
+		msg.add_query(Query::query(name, rr_type));
+		msg
+	}
+	/// Converts the given [Message] into a server-side [Request] with dummy values for
+	/// the client IP and protocol.
+	fn server_request(msg: &Message, client_addr: SocketAddr, protocol: Protocol) -> Request {
+		let wire_bytes = msg.to_vec().unwrap();
+		let msg_request = MessageRequest::from_bytes(&wire_bytes).unwrap();
+		Request::new(msg_request, client_addr, protocol)
+	}
 
-    /// Creates a A-record [Request] for the given name.
-    fn a_request(name: Name, client_addr: SocketAddr, protocol: Protocol) -> Request {
-        server_request(&new_message(name, RecordType::A), client_addr, protocol)
-    }
+	/// Creates a A-record [Request] for the given name.
+	fn a_request(name: Name, client_addr: SocketAddr, protocol: Protocol) -> Request {
+		server_request(&new_message(name, RecordType::A), client_addr, protocol)
+	}
 
-    /// Creates a AAAA-record [Request] for the given name.
-    fn aaaa_request(name: Name, client_addr: SocketAddr, protocol: Protocol) -> Request {
-        server_request(&new_message(name, RecordType::AAAA), client_addr, protocol)
-    }
+	/// Creates a AAAA-record [Request] for the given name.
+	fn aaaa_request(name: Name, client_addr: SocketAddr, protocol: Protocol) -> Request {
+		server_request(&new_message(name, RecordType::AAAA), client_addr, protocol)
+	}
 
-    // TODO: do we need to do the search?
-    let name = Name::from_utf8(hostname)?;
+	// TODO: do we need to do the search?
+	let name = Name::from_utf8(hostname)?;
 
-    // TODO: we probably want to race them or something. Is there something higher level that can handle this for us?
-    let req = if client_addr.is_ipv4() {
-        a_request(name, client_addr, Protocol::Udp)
-    } else {
-        aaaa_request(name, client_addr, Protocol::Udp)
-    };
-    let answer = resolver.lookup(&req).await?;
-    let response = answer
-        .record_iter()
-        .filter_map(|rec| rec.data().and_then(|d| d.ip_addr()))
-        .next() // TODO: do not always use the first result
-        .ok_or_else(|| Error::DnsEmpty)?;
+	// TODO: we probably want to race them or something. Is there something higher level that can handle this for us?
+	let req = if client_addr.is_ipv4() {
+		a_request(name, client_addr, Protocol::Udp)
+	} else {
+		aaaa_request(name, client_addr, Protocol::Udp)
+	};
+	let answer = resolver.lookup(&req).await?;
+	let response = answer
+		.record_iter()
+		.filter_map(|rec| rec.data().and_then(|d| d.ip_addr()))
+		.next() // TODO: do not always use the first result
+		.ok_or_else(|| Error::DnsEmpty)?;
 
-    Ok(response)
+	Ok(response)
 }

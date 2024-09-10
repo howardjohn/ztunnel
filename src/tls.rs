@@ -31,45 +31,45 @@ use rustls::server::VerifierBuilderError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("invalid root certificate: {0}")]
-    InvalidRootCert(String),
+	#[error("invalid root certificate: {0}")]
+	InvalidRootCert(String),
 
-    #[error("invalid uri: {0}")]
-    InvalidUri(#[from] Arc<InvalidUri>),
+	#[error("invalid uri: {0}")]
+	InvalidUri(#[from] Arc<InvalidUri>),
 
-    #[error("tls: {0}")]
-    Tls(#[from] rustls::Error),
+	#[error("tls: {0}")]
+	Tls(#[from] rustls::Error),
 
-    #[error("certificate parse: {0}")]
-    CertificateParseNomError(#[from] x509_parser::nom::Err<x509_parser::error::X509Error>),
+	#[error("certificate parse: {0}")]
+	CertificateParseNomError(#[from] x509_parser::nom::Err<x509_parser::error::X509Error>),
 
-    #[error("certificate: {0}")]
-    CertificateError(#[from] x509_parser::error::X509Error),
+	#[error("certificate: {0}")]
+	CertificateError(#[from] x509_parser::error::X509Error),
 
-    #[error("certificate: {0}")]
-    CertificateParseError(String),
+	#[error("certificate: {0}")]
+	CertificateParseError(String),
 
-    #[error("invalid operation: {0:?}")]
-    #[cfg(feature = "tls-boring")]
-    SslError(#[from] boring::error::ErrorStack),
+	#[error("invalid operation: {0:?}")]
+	#[cfg(feature = "tls-boring")]
+	SslError(#[from] boring::error::ErrorStack),
 
-    #[error("invalid certificate generation: {0:?}")]
-    #[cfg(feature = "tls-ring")]
-    RcgenError(Arc<rcgen::Error>),
+	#[error("invalid certificate generation: {0:?}")]
+	#[cfg(feature = "tls-ring")]
+	RcgenError(Arc<rcgen::Error>),
 
-    #[error("failed to build server verifier: {0}")]
-    ServerVerifierBuilderError(#[from] VerifierBuilderError),
+	#[error("failed to build server verifier: {0}")]
+	ServerVerifierBuilderError(#[from] VerifierBuilderError),
 }
 
 impl From<InvalidUri> for Error {
-    fn from(err: InvalidUri) -> Self {
-        Error::InvalidUri(Arc::new(err))
-    }
+	fn from(err: InvalidUri) -> Self {
+		Error::InvalidUri(Arc::new(err))
+	}
 }
 
 #[cfg(feature = "tls-ring")]
 impl From<rcgen::Error> for Error {
-    fn from(err: rcgen::Error) -> Self {
-        Error::RcgenError(Arc::new(err))
-    }
+	fn from(err: rcgen::Error) -> Self {
+		Error::RcgenError(Arc::new(err))
+	}
 }

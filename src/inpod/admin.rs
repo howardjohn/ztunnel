@@ -23,159 +23,139 @@ use std::sync::RwLock;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum State {
-    Pending,
-    Up,
+	Pending,
+	Up,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyState {
-    pub state: State,
+	pub state: State,
 
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "always_none",
-        default
-    )]
-    pub connections: Option<ConnectionManager>,
+	#[serde(skip_serializing_if = "Option::is_none", deserialize_with = "always_none", default)]
+	pub connections: Option<ConnectionManager>,
 
-    pub info: WorkloadInfo,
+	pub info: WorkloadInfo,
 
-    // using reference counts to account for possible race between the proxy task that notifies us
-    // that a proxy is down, and the proxy factory task that notifies us when it is up.
-    #[serde(skip)]
-    count: usize,
+	// using reference counts to account for possible race between the proxy task that notifies us
+	// that a proxy is down, and the proxy factory task that notifies us when it is up.
+	#[serde(skip)]
+	count: usize,
 }
 
 fn always_none<'de, D>(_deserializer: D) -> Result<Option<ConnectionManager>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+	D: serde::Deserializer<'de>,
 {
-    serde::de::IgnoredAny::deserialize(_deserializer)?;
-    Ok(None)
+	serde::de::IgnoredAny::deserialize(_deserializer)?;
+	Ok(None)
 }
 
 #[derive(Default)]
 pub struct WorkloadManagerAdminHandler {
-    state: RwLock<HashMap<crate::inpod::WorkloadUid, ProxyState>>,
+	state: RwLock<HashMap<crate::inpod::WorkloadUid, ProxyState>>,
 }
 
 impl WorkloadManagerAdminHandler {
-    pub fn proxy_pending(&self, uid: &crate::inpod::WorkloadUid, workload_info: &WorkloadInfo) {
-        let mut state = self.state.write().unwrap();
+	pub fn proxy_pending(&self, uid: &crate::inpod::WorkloadUid, workload_info: &WorkloadInfo) {
+		let mut state = self.state.write().unwrap();
 
-        // don't increment count here, as it is only for up and down. see comment in count.
-        match state.get_mut(uid) {
-            Some(key) => {
-                key.state = State::Pending;
-            }
-            None => {
-                state.insert(
-                    uid.clone(),
-                    ProxyState {
-                        state: State::Pending,
-                        connections: None,
-                        count: 0,
-                        info: workload_info.clone(),
-                    },
-                );
-            }
-        }
-    }
-    pub fn proxy_up(
-        &self,
-        uid: &crate::inpod::WorkloadUid,
-        workload_info: &WorkloadInfo,
-        cm: Option<ConnectionManager>,
-    ) {
-        let mut state = self.state.write().unwrap();
+		// don't increment count here, as it is only for up and down. see comment in count.
+		match state.get_mut(uid) {
+			Some(key) => {
+				key.state = State::Pending;
+			}
+			None => {
+				state.insert(
+					uid.clone(),
+					ProxyState { state: State::Pending, connections: None, count: 0, info: workload_info.clone() },
+				);
+			}
+		}
+	}
+	pub fn proxy_up(
+		&self,
+		uid: &crate::inpod::WorkloadUid,
+		workload_info: &WorkloadInfo,
+		cm: Option<ConnectionManager>,
+	) {
+		let mut state = self.state.write().unwrap();
 
-        match state.get_mut(uid) {
-            Some(key) => {
-                key.count += 1;
-                key.state = State::Up;
-                key.connections = cm;
-                key.info.clone_from(workload_info);
-            }
-            None => {
-                state.insert(
-                    uid.clone(),
-                    ProxyState {
-                        state: State::Up,
-                        connections: cm,
-                        count: 1,
-                        info: workload_info.clone(),
-                    },
-                );
-            }
-        }
-    }
+		match state.get_mut(uid) {
+			Some(key) => {
+				key.count += 1;
+				key.state = State::Up;
+				key.connections = cm;
+				key.info.clone_from(workload_info);
+			}
+			None => {
+				state.insert(
+					uid.clone(),
+					ProxyState { state: State::Up, connections: cm, count: 1, info: workload_info.clone() },
+				);
+			}
+		}
+	}
 
-    pub fn proxy_down(&self, uid: &crate::inpod::WorkloadUid) {
-        let mut state = self.state.write().unwrap();
+	pub fn proxy_down(&self, uid: &crate::inpod::WorkloadUid) {
+		let mut state = self.state.write().unwrap();
 
-        match state.get_mut(uid) {
-            Some(key) if key.count > 0 => {
-                key.count -= 1;
-                if key.count == 0 {
-                    state.remove(uid);
-                }
-            }
-            _ => {
-                error!("proxy_down called where no proxy was created");
-                debug_assert!(false, "proxy_down called where no proxy was created");
-            }
-        }
-    }
+		match state.get_mut(uid) {
+			Some(key) if key.count > 0 => {
+				key.count -= 1;
+				if key.count == 0 {
+					state.remove(uid);
+				}
+			}
+			_ => {
+				error!("proxy_down called where no proxy was created");
+				debug_assert!(false, "proxy_down called where no proxy was created");
+			}
+		}
+	}
 
-    fn to_json(&self) -> anyhow::Result<serde_json::Value> {
-        if let Ok(state) = self.state.read() {
-            Ok(serde_json::to_value(&*state)?)
-        } else {
-            Err(anyhow!("Failed to read state"))
-        }
-    }
+	fn to_json(&self) -> anyhow::Result<serde_json::Value> {
+		if let Ok(state) = self.state.read() {
+			Ok(serde_json::to_value(&*state)?)
+		} else {
+			Err(anyhow!("Failed to read state"))
+		}
+	}
 }
 
 impl crate::admin::AdminHandler for WorkloadManagerAdminHandler {
-    fn key(&self) -> &'static str {
-        "workloadState"
-    }
+	fn key(&self) -> &'static str {
+		"workloadState"
+	}
 
-    fn handle(&self) -> anyhow::Result<serde_json::Value> {
-        self.to_json()
-    }
+	fn handle(&self) -> anyhow::Result<serde_json::Value> {
+		self.to_json()
+	}
 }
 
 #[cfg(test)]
 mod test {
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn test_proxy_state() {
-        let handler = WorkloadManagerAdminHandler::default();
-        let data = || serde_json::to_string(&handler.to_json().unwrap()).unwrap();
+	#[test]
+	fn test_proxy_state() {
+		let handler = WorkloadManagerAdminHandler::default();
+		let data = || serde_json::to_string(&handler.to_json().unwrap()).unwrap();
 
-        let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
-        let wli = WorkloadInfo {
-            name: "name".to_string(),
-            namespace: "ns".to_string(),
-            service_account: "sa".to_string(),
-        };
-        handler.proxy_pending(&uid1, &wli);
-        assert_eq!(
-            data(),
-            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Pending"}}"#
-        );
-        handler.proxy_up(&uid1, &wli, None);
-        assert_eq!(
-            data(),
-            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Up"}}"#
-        );
-        handler.proxy_down(&uid1);
-        assert_eq!(data(), "{}");
+		let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
+		let wli =
+			WorkloadInfo { name: "name".to_string(), namespace: "ns".to_string(), service_account: "sa".to_string() };
+		handler.proxy_pending(&uid1, &wli);
+		assert_eq!(
+			data(),
+			r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Pending"}}"#
+		);
+		handler.proxy_up(&uid1, &wli, None);
+		assert_eq!(data(), r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Up"}}"#);
+		handler.proxy_down(&uid1);
+		assert_eq!(data(), "{}");
 
-        let state = handler.state.read().unwrap();
-        assert_eq!(state.len(), 0);
-    }
+		let state = handler.state.read().unwrap();
+		assert_eq!(state.len(), 0);
+	}
 }

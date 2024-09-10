@@ -20,27 +20,26 @@ use crate::strng::Strng;
 #[allow(warnings)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 pub mod service {
-    pub mod discovery {
-        pub mod v3 {
-            tonic::include_proto!("envoy.service.discovery.v3");
-        }
-    }
+	pub mod discovery {
+		pub mod v3 {
+			tonic::include_proto!("envoy.service.discovery.v3");
+		}
+	}
 }
 
 #[allow(warnings)]
 #[warn(clippy::derive_partial_eq_without_eq)]
 pub mod istio {
-    pub mod workload {
-        tonic::include_proto!("istio.workload");
-    }
-    pub mod security {
-        tonic::include_proto!("istio.security");
-    }
-    pub mod ca {
-        tonic::include_proto!("istio.v1.auth");
-    }
+	pub mod workload {
+		tonic::include_proto!("istio.workload");
+	}
+	pub mod security {
+		tonic::include_proto!("istio.security");
+	}
+	pub mod ca {
+		tonic::include_proto!("istio.v1.auth");
+	}
 }
 
 pub const ADDRESS_TYPE: Strng = strng::literal!("type.googleapis.com/istio.workload.Address");
-pub const AUTHORIZATION_TYPE: Strng =
-    strng::literal!("type.googleapis.com/istio.security.Authorization");
+pub const AUTHORIZATION_TYPE: Strng = strng::literal!("type.googleapis.com/istio.security.Authorization");

@@ -23,24 +23,21 @@ pub struct Metrics {}
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct IstioBuildLabel {
-    component: String,
-    tag: String,
+	component: String,
+	tag: String,
 }
 
 impl Metrics {
-    pub fn new(registry: &mut Registry) -> Self {
-        let build_gauge: Family<IstioBuildLabel, Gauge> = Default::default();
-        registry.register("build", "Istio component build info", build_gauge.clone());
+	pub fn new(registry: &mut Registry) -> Self {
+		let build_gauge: Family<IstioBuildLabel, Gauge> = Default::default();
+		registry.register("build", "Istio component build info", build_gauge.clone());
 
-        let tag = version::BuildInfo::new().istio_version;
-        // Note: tag refers to the "Istio version", not the ztunnels own tag (which is an implementation detail to Istio).
-        build_gauge
-            .get_or_create(&IstioBuildLabel {
-                component: "ztunnel".to_string(),
-                tag,
-            })
-            .set(1);
+		let tag = version::BuildInfo::new().istio_version;
+		// Note: tag refers to the "Istio version", not the ztunnels own tag (which is an implementation detail to Istio).
+		build_gauge
+			.get_or_create(&IstioBuildLabel { component: "ztunnel".to_string(), tag })
+			.set(1);
 
-        Self {}
-    }
+		Self {}
+	}
 }

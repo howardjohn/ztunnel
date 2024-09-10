@@ -21,125 +21,125 @@ use tokio::sync::watch;
 /// A PolicyStore encapsulates all policy information about workloads in the mesh
 #[derive(Default, Debug)]
 pub struct PolicyStore {
-    /// policies maintains a mapping of ns/name to policy.
-    pub(super) by_key: HashMap<Strng, Authorization>,
+	/// policies maintains a mapping of ns/name to policy.
+	pub(super) by_key: HashMap<Strng, Authorization>,
 
-    /// policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
-    by_namespace: HashMap<Strng, HashSet<Strng>>,
+	/// policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
+	by_namespace: HashMap<Strng, HashSet<Strng>>,
 
-    notifier: PolicyStoreNotify,
+	notifier: PolicyStoreNotify,
 }
 
 #[derive(Debug)]
 struct PolicyStoreNotify {
-    sender: watch::Sender<()>,
+	sender: watch::Sender<()>,
 }
 
 impl Default for PolicyStoreNotify {
-    fn default() -> Self {
-        let (tx, _rx) = watch::channel(());
-        PolicyStoreNotify { sender: tx }
-    }
+	fn default() -> Self {
+		let (tx, _rx) = watch::channel(());
+		PolicyStoreNotify { sender: tx }
+	}
 }
 
 impl PolicyStore {
-    pub fn get(&self, key: &Strng) -> Option<&Authorization> {
-        self.by_key.get(key)
-    }
+	pub fn get(&self, key: &Strng) -> Option<&Authorization> {
+		self.by_key.get(key)
+	}
 
-    pub fn get_by_namespace(&self, namespace: &Strng) -> Vec<Strng> {
-        self.by_namespace
-            .get(namespace)
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect()
-    }
+	pub fn get_by_namespace(&self, namespace: &Strng) -> Vec<Strng> {
+		self.by_namespace
+			.get(namespace)
+			.into_iter()
+			.flatten()
+			.cloned()
+			.collect()
+	}
 
-    pub fn insert(&mut self, xds_name: Strng, rbac: Authorization) {
-        self.remove(xds_name.clone());
-        match rbac.scope {
-            RbacScope::Global => {
-                self.by_namespace
-                    .entry(strng::EMPTY)
-                    .or_default()
-                    .insert(xds_name.clone());
-            }
-            RbacScope::Namespace => {
-                self.by_namespace
-                    .entry(strng::new(&rbac.namespace))
-                    .or_default()
-                    .insert(xds_name.clone());
-            }
-            RbacScope::WorkloadSelector => {}
-        }
-        self.by_key.insert(xds_name.clone(), rbac);
-    }
+	pub fn insert(&mut self, xds_name: Strng, rbac: Authorization) {
+		self.remove(xds_name.clone());
+		match rbac.scope {
+			RbacScope::Global => {
+				self.by_namespace
+					.entry(strng::EMPTY)
+					.or_default()
+					.insert(xds_name.clone());
+			}
+			RbacScope::Namespace => {
+				self.by_namespace
+					.entry(strng::new(&rbac.namespace))
+					.or_default()
+					.insert(xds_name.clone());
+			}
+			RbacScope::WorkloadSelector => {}
+		}
+		self.by_key.insert(xds_name.clone(), rbac);
+	}
 
-    pub fn remove(&mut self, xds_name: Strng) {
-        let Some(rbac) = self.by_key.remove(&xds_name) else {
-            return;
-        };
-        if let Some(key) = match rbac.scope {
-            RbacScope::Global => Some(strng::EMPTY),
-            RbacScope::Namespace => Some(rbac.namespace),
-            RbacScope::WorkloadSelector => None,
-        } {
-            if let Some(pl) = self.by_namespace.get_mut(&key) {
-                pl.remove(&xds_name);
-                if pl.is_empty() {
-                    self.by_namespace.remove(&key);
-                }
-            }
-        }
-    }
-    pub fn subscribe(&self) -> watch::Receiver<()> {
-        self.notifier.sender.subscribe()
-    }
-    pub fn send(&mut self) {
-        self.notifier.sender.send_replace(());
-    }
-    pub fn clear_all_policies(&mut self) {
-        self.by_namespace.clear();
-        self.by_key.clear();
-    }
+	pub fn remove(&mut self, xds_name: Strng) {
+		let Some(rbac) = self.by_key.remove(&xds_name) else {
+			return;
+		};
+		if let Some(key) = match rbac.scope {
+			RbacScope::Global => Some(strng::EMPTY),
+			RbacScope::Namespace => Some(rbac.namespace),
+			RbacScope::WorkloadSelector => None,
+		} {
+			if let Some(pl) = self.by_namespace.get_mut(&key) {
+				pl.remove(&xds_name);
+				if pl.is_empty() {
+					self.by_namespace.remove(&key);
+				}
+			}
+		}
+	}
+	pub fn subscribe(&self) -> watch::Receiver<()> {
+		self.notifier.sender.subscribe()
+	}
+	pub fn send(&mut self) {
+		self.notifier.sender.send_replace(());
+	}
+	pub fn clear_all_policies(&mut self) {
+		self.by_namespace.clear();
+		self.by_key.clear();
+	}
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::rbac::{RbacAction, RbacMatch, StringMatch};
+	use super::*;
+	use crate::rbac::{RbacAction, RbacMatch, StringMatch};
 
-    #[test]
-    fn rbac_change_scope() {
-        let mut store = PolicyStore::default();
-        let namespace = "default";
-        let name = "test_policy";
-        let mut xds_name = String::with_capacity(1 + namespace.len() + name.len());
-        xds_name.push_str(namespace);
-        xds_name.push('/');
-        xds_name.push_str(name);
-        let mut policy = Authorization {
-            name: name.into(),
-            namespace: namespace.into(),
-            scope: RbacScope::Namespace,
-            action: RbacAction::Allow,
-            rules: vec![vec![vec![RbacMatch {
-                namespaces: vec![StringMatch::Exact("whatever".into())],
-                ..Default::default()
-            }]]],
-        };
-        let policy_key = policy.to_key();
-        // insert this namespace-scoped policy into policystore then assert it is
-        // exists in by_namespace of policystore
-        store.insert(xds_name.clone().into(), policy.clone());
-        let namespace_policies = store.get_by_namespace(&namespace.into());
-        assert!(namespace_policies.contains(&policy_key));
-        // change policy scope to workload and insert it into policystore again, then
-        // assert it is not exists in by_namespace of policystore anymore
-        policy.scope = RbacScope::WorkloadSelector;
-        store.insert(xds_name.clone().into(), policy.clone());
-        let namespace_policies = store.get_by_namespace(&namespace.into());
-        assert!(!namespace_policies.contains(&policy_key));
-    }
+	#[test]
+	fn rbac_change_scope() {
+		let mut store = PolicyStore::default();
+		let namespace = "default";
+		let name = "test_policy";
+		let mut xds_name = String::with_capacity(1 + namespace.len() + name.len());
+		xds_name.push_str(namespace);
+		xds_name.push('/');
+		xds_name.push_str(name);
+		let mut policy = Authorization {
+			name: name.into(),
+			namespace: namespace.into(),
+			scope: RbacScope::Namespace,
+			action: RbacAction::Allow,
+			rules: vec![vec![vec![RbacMatch {
+				namespaces: vec![StringMatch::Exact("whatever".into())],
+				..Default::default()
+			}]]],
+		};
+		let policy_key = policy.to_key();
+		// insert this namespace-scoped policy into policystore then assert it is
+		// exists in by_namespace of policystore
+		store.insert(xds_name.clone().into(), policy.clone());
+		let namespace_policies = store.get_by_namespace(&namespace.into());
+		assert!(namespace_policies.contains(&policy_key));
+		// change policy scope to workload and insert it into policystore again, then
+		// assert it is not exists in by_namespace of policystore anymore
+		policy.scope = RbacScope::WorkloadSelector;
+		store.insert(xds_name.clone().into(), policy.clone());
+		let namespace_policies = store.get_by_namespace(&namespace.into());
+		assert!(!namespace_policies.contains(&policy_key));
+	}
 }
