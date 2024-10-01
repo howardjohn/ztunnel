@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use futures_util::TryFutureExt;
@@ -187,6 +187,11 @@ pub(super) struct OutboundConnection {
     pub(super) send_socks5_success: bool,
 }
 
+enum EstablishedConnection{
+    H2(H2Stream),
+    TCP(copy::TcpStreamSplitter)
+}
+
 impl OutboundConnection {
     async fn proxy(&mut self, source_stream: TcpStream) {
         let source_addr =
@@ -241,56 +246,11 @@ impl OutboundConnection {
             metrics,
         ));
 
-        let res = match req.protocol {
-            Protocol::HBONE => match self.proxy_to_hbone(source_addr, &req).await {
-                Ok(outbound) => {
-                    if let Err(e) = self
-                        .maybe_send_socks5_success(&mut source_stream, outbound.local_addr)
-                        .await
-                    {
-                        Err(e)
-                    } else {
-                        copy::copy_bidirectional(
-                            copy::TcpStreamSplitter(source_stream),
-                            outbound,
-                            &result_tracker,
-                        )
-                        .await
-                    }
-                }
-                Err(err) => {
-                    let e = OutboundProxyError::ConnectionRefused(err);
-                    self.maybe_send_socks5_error(&e, &mut source_stream).await;
-                    Err(e.into_inner())
-                }
-            },
-            Protocol::TCP => match self.proxy_to_tcp(&req).await {
-                Ok(outbound) => {
-                    if let Err(e) = self
-                        .maybe_send_socks5_success(
-                            &mut source_stream,
-                            outbound.0.local_addr().unwrap(),
-                        )
-                        .await
-                    {
-                        Err(e)
-                    } else {
-                        copy::copy_bidirectional(
-                            copy::TcpStreamSplitter(source_stream),
-                            outbound,
-                            &result_tracker,
-                        )
-                        .await
-                    }
-                }
-                Err(err) => {
-                    let e = OutboundProxyError::ConnectionRefused(err);
-                    self.maybe_send_socks5_error(&e, &mut source_stream).await;
-                    Err(e.into_inner())
-                }
-            },
+        let conn = match req.protocol {
+            Protocol::HBONE => self.proxy_to_hbone(source_addr, &req).await.map(EstablishedConnection::H2),
+            Protocol::TCP => self.proxy_to_tcp(&req).await.map(EstablishedConnection::TCP),
         };
-        result_tracker.record(res);
+        Box::pin(self.finalize_outbound(conn, result_tracker, source_stream)).await
     }
 
     async fn proxy_to_hbone(
@@ -521,6 +481,43 @@ impl OutboundConnection {
             return;
         }
         crate::proxy::socks5::send_error(err, source_stream).await
+    }
+
+    async fn finalize_outbound(&mut self, conn: Result<EstablishedConnection, Error>, result_tracker: Box<ConnectionResult>, mut source_stream: TcpStream) {
+
+        let conn = match conn {
+            Ok(conn) => conn,
+            Err(err) => {
+                let e = OutboundProxyError::ConnectionRefused(err);
+                self.maybe_send_socks5_error(&e, &mut source_stream).await;
+                result_tracker.record(Err(e.into_inner()));
+                return
+            }
+        };
+        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+        let res = if let Err(e) = self
+          .maybe_send_socks5_success(&mut source_stream, dummy_addr)
+          .await
+        {
+            Err(e)
+        } else {
+            let s = copy::TcpStreamSplitter(source_stream);
+            match conn {
+                EstablishedConnection::H2(outbound) => copy::copy_bidirectional(
+                    s,
+                    outbound,
+                    &result_tracker,
+                )
+                  .await,
+                EstablishedConnection::TCP(outbound) => copy::copy_bidirectional(
+                    s,
+                    outbound,
+                    &result_tracker,
+                )
+                  .await
+            }
+        };
+        result_tracker.record(res);
     }
 }
 
