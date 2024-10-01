@@ -167,7 +167,7 @@ impl Inbound {
             Err(InboundError(e, code)) => {
                 // At this point in processing, we never built up full context to log a complete access log.
                 // Instead, just log a minimal error line.
-                metrics::log_early_deny(src, dst, Reporter::destination, e);
+                metrics::log_early_deny(src, dst, Reporter::destination, &e);
                 if let Err(err) = req.send_error(build_response(code)) {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }

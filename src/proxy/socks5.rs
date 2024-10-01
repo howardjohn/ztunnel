@@ -15,22 +15,21 @@
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 
+use crate::dns::resolver::Resolver;
 use hickory_proto::op::{Message, MessageType, Query};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
 use hickory_server::authority::MessageRequest;
 use hickory_server::server::{Protocol, Request};
+use outbound::OutboundProxyError;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
-
-use crate::dns::resolver::Resolver;
-use outbound::OutboundProxyError;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use tracing::{debug, error, info, info_span, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
@@ -103,9 +102,7 @@ impl Socks5 {
                                     _ = force_shutdown.changed() => {
                                         debug!(component="socks5", "connection forcefully terminated");
                                     }
-                                    err = handle(oc, stream) => {
-                                        tracing::error!("howardjohn: {err:?}");
-                                    }
+                                    _ = handle_socks_connection(oc, stream) => {}
                                 }
                                 // Mark we are done with the connection, so drain can complete
                                 drop(drain);
@@ -135,12 +132,27 @@ impl Socks5 {
         .await
     }
 }
-
+async fn handle_socks_connection(mut oc: OutboundConnection, mut stream: TcpStream) {
+    match negotiate_socks_connection(&oc.pi, &mut stream).await {
+        Ok(target) => {
+            let remote_addr =
+                socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
+            oc.proxy_to(stream, remote_addr, target).await
+        }
+        Err(e) => {
+            warn!("failed to negotiate socks connection: {e}");
+            send_error(&e, &mut stream).await;
+        }
+    }
+}
 // handle will process a SOCKS5 connection. This supports a minimal subset of the protocol,
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6
-async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> std::result::Result<(), anyhow::Error> {
+async fn negotiate_socks_connection(
+    pi: &ProxyInputs,
+    stream: &mut TcpStream,
+) -> Result<SocketAddr, OutboundProxyError> {
     let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
 
     // Version(5), Number of auth methods
@@ -148,13 +160,19 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> std::resul
     stream.read_exact(&mut version).await?;
 
     if version[0] != 0x05 {
-        return Err(anyhow::anyhow!("Invalid version"));
+        return Err(OutboundProxyError::invalid_protocol(format!(
+            "unsupported version {}",
+            version[0]
+        )));
     }
 
     let nmethods = version[1];
 
     if nmethods == 0 {
-        return Err(OutboundProxyError::CommandNotSupported.into());
+        return Err(OutboundProxyError::invalid_protocol(format!(
+            "methods cannot be zero {}",
+            version[0]
+        )));
     }
 
     // List of supported auth methods
@@ -163,7 +181,9 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> std::resul
 
     // Client must include 'unauthenticated' (0).
     if !methods.into_iter().any(|x| x == 0) {
-        return Err(OutboundProxyError::CommandNotSupported.into());
+        return Err(OutboundProxyError::invalid_protocol(
+            "only unauthenticated is supported".to_string(),
+        ));
     }
 
     // Select 'unauthenticated' (0).
@@ -175,14 +195,17 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> std::resul
     let version = version_command[0];
 
     if version != 0x05 {
-        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-        return Ok(send_response(Some(OutboundProxyError::CommandNotSupported), &mut stream, dummy_addr).await?);
-        // return Err(OutboundProxyError::CommandNotSupported.into());
+        return Err(OutboundProxyError::invalid_protocol(format!(
+            "unsupported version {}",
+            version
+        )));
     }
 
     if version_command[1] != 1 {
-        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-        return Ok(send_response(Some(OutboundProxyError::CommandNotSupported), &mut stream, dummy_addr).await?);
+        return Err(OutboundProxyError::invalid_protocol(format!(
+            "unsupported command {}",
+            version_command[1]
+        )));
     }
 
     // Skip RSV
@@ -191,7 +214,6 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> std::resul
     // Address type
     let mut atyp = [0u8];
     stream.read_exact(&mut atyp).await?;
-
 
     let ip = match atyp[0] {
         0x01 => {
@@ -209,29 +231,29 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> std::resul
             stream.read_exact(&mut domain_length).await?;
             let mut domain = vec![0u8; domain_length[0] as usize];
             stream.read_exact(&mut domain).await?;
-            // TODO: DNS lookup, if we want to integrate with HTTP-based apps without
-            // a DNS server.
-            let ds = std::str::from_utf8(&domain)?;
-            let Some(resolver) = &oc.pi.resolver else {
-                return Err(anyhow::anyhow!(
-                    "unsupported hostname lookup, requires DNS enabled"
+
+            let Ok(ds) = std::str::from_utf8(&domain) else {
+                return Err(OutboundProxyError::invalid_protocol(format!(
+                    "domain is not a valid utf8 string: {domain:?}"
+                )));
+            };
+            let Some(resolver) = &pi.resolver else {
+                return Err(OutboundProxyError::invalid_protocol(
+                    "unsupported hostname lookup, requires DNS enabled".to_string(),
                 ));
             };
 
             match dns_lookup(resolver.clone(), remote_addr, ds).await {
                 Ok(ip) => ip,
                 Err(e) => {
-
-                    let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-                    return Ok(send_response(Some(OutboundProxyError::HostUnreachable), &mut stream, dummy_addr).await?);
-                    return Err(OutboundProxyError::HostUnreachable.into());
+                    return Err(OutboundProxyError::HostUnreachable(e));
                 }
             }
         }
-        _ => {
-            let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-            return Ok(send_response(Some(OutboundProxyError::HostUnreachable), &mut stream, dummy_addr).await?);
-            return Err(OutboundProxyError::HostUnreachable.into());
+        n => {
+            return Err(OutboundProxyError::invalid_protocol(format!(
+                "unsupported address type {n}",
+            )));
         }
     };
 
@@ -241,15 +263,7 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> std::resul
 
     let host = SocketAddr::new(ip, port);
 
-    debug!("accepted connection from {remote_addr} to {host}");
-    if let Err(e) = oc.proxy_to(stream, remote_addr, host).await {
-        // Got an error, need to send that...
-        // Not sure anywhere this is specified, but it seems common to return all zeros when we fail to bind
-        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-        todo!();
-        // send_response(Some(e), stream, dummy_addr)
-    }
-    Ok(())
+    Ok(host)
 }
 
 async fn dns_lookup(
@@ -302,27 +316,44 @@ async fn dns_lookup(
     Ok(response)
 }
 
-pub async fn send_response(
-    err: Option<OutboundProxyError>,
+/// send_error sends an error back to the SOCKS client
+/// This may fail, but since there is nothing a caller can do about it, failures are simply logged and
+/// not returned.
+pub async fn send_error(err: &OutboundProxyError, source: &mut TcpStream) {
+    // SOCKS response requires us to send a 'server bound address'.
+    // It's supposed to be the local address we have bound to.
+    // In many cases, when we are fail we don't have this.
+    let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+    if let Err(e) = send_response(Some(err), source, dummy_addr).await {
+        warn!("failed to send socks error: {e}")
+    }
+}
+
+/// send_success sends a success back to the SOCKS client.
+pub async fn send_success(source: &mut TcpStream, local_addr: SocketAddr) -> Result<(), Error> {
+    send_response(None, source, local_addr).await
+}
+
+async fn send_response(
+    err: Option<&OutboundProxyError>,
     source: &mut TcpStream,
-    local: SocketAddr,
+    local_addr: SocketAddr,
 ) -> Result<(), Error> {
-    tracing::error!("howardjohn: respond {err:?}");
     // https://www.rfc-editor.org/rfc/rfc1928#section-6
     let mut buf: Vec<u8> = Vec::with_capacity(10);
     buf.push(0x05); // version
                     // Status
     buf.push(match err {
         None => 0,
-        Some(OutboundProxyError::General) => 1,
-        Some(OutboundProxyError::NotAllowed) => 2,
-        Some(OutboundProxyError::NetworkUnreachable) => 3,
-        Some(OutboundProxyError::HostUnreachable) => 4,
-        Some(OutboundProxyError::ConnectionRefused) => 5,
-        Some(OutboundProxyError::CommandNotSupported) => 7,
+        Some(OutboundProxyError::General(_)) => 1,
+        Some(OutboundProxyError::NotAllowed(_)) => 2,
+        Some(OutboundProxyError::NetworkUnreachable(_)) => 3,
+        Some(OutboundProxyError::HostUnreachable(_)) => 4,
+        Some(OutboundProxyError::ConnectionRefused(_)) => 5,
+        Some(OutboundProxyError::CommandNotSupported(_)) => 7,
     });
     buf.push(0); // RSV
-    match local {
+    match local_addr {
         SocketAddr::V4(addr_v4) => {
             buf.push(0x01); // IPv4 address type
             buf.extend_from_slice(&addr_v4.ip().octets());
@@ -333,7 +364,7 @@ pub async fn send_response(
         }
     }
     // Add port in network byte order (big-endian)
-    buf.extend_from_slice(&local.port().to_be_bytes());
+    buf.extend_from_slice(&local_addr.port().to_be_bytes());
     source.write_all(&buf).await?;
     Ok(())
 }

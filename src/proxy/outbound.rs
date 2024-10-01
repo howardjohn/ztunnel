@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use futures_util::TryFutureExt;
@@ -31,7 +30,6 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult, DerivedWorkload};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 
-use crate::copy::BufferedSplitter;
 use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::H2Stream;
@@ -46,20 +44,50 @@ pub struct Outbound {
     listener: socket::Listener,
 }
 
-#[derive(thiserror::Error, Debug, Clone)]
+/// OutboundProxyError maps outbound errors to SOCKS5 protocol errors
+/// See https://datatracker.ietf.org/doc/html/rfc1928#section-6.
+/// While the socks protocol only allows the int error, we record the full error
+/// for our own logging purposes.
+#[derive(thiserror::Error, Debug)]
+#[allow(dead_code)]
 pub enum OutboundProxyError {
-    #[error("General")]
-    General,
-    #[error("NotAllowed")]
-    NotAllowed,
-    #[error("NetworkUnreachable")]
-    NetworkUnreachable,
-    #[error("HostUnreachable")]
-    HostUnreachable,
-    #[error("ConnectionRefused")]
-    ConnectionRefused,
-    #[error("CommandNotSupported")]
-    CommandNotSupported,
+    #[error("General: {0}")]
+    General(Error),
+    #[error("NotAllowed: {0}")]
+    NotAllowed(Error),
+    #[error("NetworkUnreachable: {0}")]
+    NetworkUnreachable(Error),
+    #[error("HostUnreachable: {0}")]
+    HostUnreachable(Error),
+    #[error("ConnectionRefused: {0}")]
+    ConnectionRefused(Error),
+    #[error("CommandNotSupported: {0}")]
+    CommandNotSupported(Error),
+}
+
+impl OutboundProxyError {
+    pub fn into_inner(self) -> Error {
+        match self {
+            OutboundProxyError::General(e) => e,
+            OutboundProxyError::NotAllowed(e) => e,
+            OutboundProxyError::NetworkUnreachable(e) => e,
+            OutboundProxyError::HostUnreachable(e) => e,
+            OutboundProxyError::ConnectionRefused(e) => e,
+            OutboundProxyError::CommandNotSupported(e) => e,
+        }
+    }
+}
+
+impl OutboundProxyError {
+    pub fn invalid_protocol(reason: String) -> OutboundProxyError {
+        OutboundProxyError::CommandNotSupported(Error::Anyhow(anyhow::anyhow!(reason)))
+    }
+}
+
+impl From<std::io::Error> for OutboundProxyError {
+    fn from(value: std::io::Error) -> Self {
+        OutboundProxyError::General(Error::Io(value))
+    }
 }
 
 impl Outbound {
@@ -164,8 +192,7 @@ impl OutboundConnection {
         let source_addr =
             socket::to_canonical(source_stream.peer_addr().expect("must receive peer addr"));
         let dst_addr = socket::orig_dst_addr_or_default(&source_stream);
-        // Any errors should already be logged (function returns an error as socks5 mode needs it).
-        let _ = self.proxy_to(source_stream, source_addr, dst_addr).await;
+        self.proxy_to(source_stream, source_addr, dst_addr).await;
     }
 
     pub async fn proxy_to(
@@ -173,7 +200,7 @@ impl OutboundConnection {
         mut source_stream: TcpStream,
         source_addr: SocketAddr,
         dest_addr: SocketAddr,
-    ) -> Result<(), Error> {
+    ) {
         let start = Instant::now();
 
         // First find the source workload of this traffic. If we don't know where the request is from
@@ -186,16 +213,16 @@ impl OutboundConnection {
         let req = match Box::pin(build).await {
             Ok(req) => Box::new(req),
             Err(err) => {
-                metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
-                let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-                return crate::proxy::socks5::send_response(
-                    Some(OutboundProxyError::HostUnreachable),
+                metrics::log_early_deny(source_addr, dest_addr, Reporter::source, &err);
+                self.maybe_send_socks5_error(
+                    &OutboundProxyError::HostUnreachable(err),
                     &mut source_stream,
-                    dummy_addr,
                 )
                 .await;
+                return;
             }
         };
+
         // TODO: should we use the original address or the actual address? Both seems nice!
         let _conn_guard = self.pi.connection_manager.track_outbound(
             source_addr,
@@ -215,12 +242,14 @@ impl OutboundConnection {
         ));
 
         let res = match req.protocol {
-            Protocol::HBONE => {
-                match self.proxy_to_hbone(source_addr, &req).await {
-                    Ok(outbound) => {
-                        self.maybe_send_socks5_success(&mut source_stream, outbound.local_addr)
-                            .await.expect("TODO");
-                        // Proxying data between downstream and upstream
+            Protocol::HBONE => match self.proxy_to_hbone(source_addr, &req).await {
+                Ok(outbound) => {
+                    if let Err(e) = self
+                        .maybe_send_socks5_success(&mut source_stream, outbound.local_addr)
+                        .await
+                    {
+                        Err(e)
+                    } else {
                         copy::copy_bidirectional(
                             copy::TcpStreamSplitter(source_stream),
                             outbound,
@@ -228,26 +257,24 @@ impl OutboundConnection {
                         )
                         .await
                     }
-                    Err(err) => {
-                        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-                        crate::proxy::socks5::send_response(
-                            Some(OutboundProxyError::ConnectionRefused),
-                            &mut source_stream,
-                            dummy_addr,
-                        )
-                        .await
-                    }
                 }
-            }
-            Protocol::TCP => {
-                match self.proxy_to_tcp(&req).await {
-                    Ok(outbound) => {
-                        self.maybe_send_socks5_success(
+                Err(err) => {
+                    let e = OutboundProxyError::ConnectionRefused(err);
+                    self.maybe_send_socks5_error(&e, &mut source_stream).await;
+                    Err(e.into_inner())
+                }
+            },
+            Protocol::TCP => match self.proxy_to_tcp(&req).await {
+                Ok(outbound) => {
+                    if let Err(e) = self
+                        .maybe_send_socks5_success(
                             &mut source_stream,
                             outbound.0.local_addr().unwrap(),
                         )
-                        .await.expect("TODO");
-                        // Proxying data between downstream and upstream
+                        .await
+                    {
+                        Err(e)
+                    } else {
                         copy::copy_bidirectional(
                             copy::TcpStreamSplitter(source_stream),
                             outbound,
@@ -255,20 +282,15 @@ impl OutboundConnection {
                         )
                         .await
                     }
-                    Err(err) => {
-                        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-                        crate::proxy::socks5::send_response(
-                            Some(OutboundProxyError::ConnectionRefused),
-                            &mut source_stream,
-                            dummy_addr,
-                        )
-                        .await
-                    }
                 }
-            }
+                Err(err) => {
+                    let e = OutboundProxyError::ConnectionRefused(err);
+                    self.maybe_send_socks5_error(&e, &mut source_stream).await;
+                    Err(e.into_inner())
+                }
+            },
         };
         result_tracker.record(res);
-        Ok(())
     }
 
     async fn proxy_to_hbone(
@@ -488,7 +510,17 @@ impl OutboundConnection {
         if !self.send_socks5_success {
             return Ok(());
         }
-        crate::proxy::socks5::send_response(None, source_stream, local_addr).await
+        crate::proxy::socks5::send_success(source_stream, local_addr).await
+    }
+    async fn maybe_send_socks5_error(
+        &mut self,
+        err: &OutboundProxyError,
+        source_stream: &mut TcpStream,
+    ) {
+        if !self.send_socks5_success {
+            return;
+        }
+        crate::proxy::socks5::send_error(err, source_stream).await
     }
 }
 

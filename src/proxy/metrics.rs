@@ -327,7 +327,7 @@ pub fn log_early_deny<E: std::error::Error>(
     src: SocketAddr,
     dst: SocketAddr,
     reporter: Reporter,
-    err: E,
+    err: &E,
 ) {
     event!(
             target: "access",

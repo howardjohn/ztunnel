@@ -141,14 +141,14 @@ impl InboundPassthrough {
                 source_addr,
                 dest_addr,
                 Reporter::destination,
-                Error::SelfCall,
+                &Error::SelfCall,
             );
             return;
         }
         let upstream_workload = match pi.local_workload_information.get_workload().await {
             Ok(upstream_workload) => upstream_workload,
             Err(e) => {
-                metrics::log_early_deny(source_addr, dest_addr, Reporter::destination, e);
+                metrics::log_early_deny(source_addr, dest_addr, Reporter::destination, &e);
                 return;
             }
         };
