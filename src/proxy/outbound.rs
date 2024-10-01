@@ -173,7 +173,7 @@ impl OutboundConnection {
         mut source_stream: TcpStream,
         source_addr: SocketAddr,
         dest_addr: SocketAddr,
-    ) -> Result<(), OutboundProxyError> {
+    ) -> Result<(), Error> {
         let start = Instant::now();
 
         // First find the source workload of this traffic. If we don't know where the request is from
@@ -187,7 +187,13 @@ impl OutboundConnection {
             Ok(req) => Box::new(req),
             Err(err) => {
                 metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
-                return Err(OutboundProxyError::General);
+                let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+                return crate::proxy::socks5::send_response(
+                    Some(OutboundProxyError::HostUnreachable),
+                    &mut source_stream,
+                    dummy_addr,
+                )
+                .await;
             }
         };
         // TODO: should we use the original address or the actual address? Both seems nice!
@@ -208,64 +214,60 @@ impl OutboundConnection {
             metrics,
         ));
 
-        let res = || async {
-            match req.protocol {
-                Protocol::HBONE => {
-                    match self.proxy_to_hbone(source_addr, &req).await {
-                        Ok(outbound) => {
-                            self.maybe_send_socks5_success(&mut source_stream, outbound.local_addr)
-                                .await?;
-                            // Proxying data between downstream and upstream
-                            copy::copy_bidirectional(
-                                copy::TcpStreamSplitter(source_stream),
-                                outbound,
-                                &result_tracker,
-                            )
-                            .await
-                        }
-                        Err(err) => {
-                            let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-                            crate::proxy::socks5::send_response(
-                                Some(OutboundProxyError::ConnectionRefused),
-                                &mut source_stream,
-                                dummy_addr,
-                            )
-                            .await
-                        }
+        let res = match req.protocol {
+            Protocol::HBONE => {
+                match self.proxy_to_hbone(source_addr, &req).await {
+                    Ok(outbound) => {
+                        self.maybe_send_socks5_success(&mut source_stream, outbound.local_addr)
+                            .await.expect("TODO");
+                        // Proxying data between downstream and upstream
+                        copy::copy_bidirectional(
+                            copy::TcpStreamSplitter(source_stream),
+                            outbound,
+                            &result_tracker,
+                        )
+                        .await
+                    }
+                    Err(err) => {
+                        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+                        crate::proxy::socks5::send_response(
+                            Some(OutboundProxyError::ConnectionRefused),
+                            &mut source_stream,
+                            dummy_addr,
+                        )
+                        .await
                     }
                 }
-                Protocol::TCP => {
-                    match self.proxy_to_tcp(&req).await {
-                        Ok(outbound) => {
-                            self.maybe_send_socks5_success(
-                                &mut source_stream,
-                                outbound.0.local_addr().unwrap(),
-                            )
-                            .await?;
-                            // Proxying data between downstream and upstream
-                            copy::copy_bidirectional(
-                                copy::TcpStreamSplitter(source_stream),
-                                outbound,
-                                &result_tracker,
-                            )
-                            .await
-                        }
-                        Err(err) => {
-                            let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
-                            crate::proxy::socks5::send_response(
-                                Some(OutboundProxyError::ConnectionRefused),
-                                &mut source_stream,
-                                dummy_addr,
-                            )
-                            .await
-                        }
+            }
+            Protocol::TCP => {
+                match self.proxy_to_tcp(&req).await {
+                    Ok(outbound) => {
+                        self.maybe_send_socks5_success(
+                            &mut source_stream,
+                            outbound.0.local_addr().unwrap(),
+                        )
+                        .await.expect("TODO");
+                        // Proxying data between downstream and upstream
+                        copy::copy_bidirectional(
+                            copy::TcpStreamSplitter(source_stream),
+                            outbound,
+                            &result_tracker,
+                        )
+                        .await
+                    }
+                    Err(err) => {
+                        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+                        crate::proxy::socks5::send_response(
+                            Some(OutboundProxyError::ConnectionRefused),
+                            &mut source_stream,
+                            dummy_addr,
+                        )
+                        .await
                     }
                 }
-            };
+            }
         };
-        let r = res();
-        let rr = r.await;
-        result_tracker.record(rr);
+        result_tracker.record(res);
         Ok(())
     }
 

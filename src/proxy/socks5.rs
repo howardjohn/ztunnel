@@ -103,14 +103,16 @@ impl Socks5 {
                                     _ = force_shutdown.changed() => {
                                         debug!(component="socks5", "connection forcefully terminated");
                                     }
-                                    _ = handle(oc, stream) => {}
+                                    err = handle(oc, stream) => {
+                                        tracing::error!("howardjohn: {err:?}");
+                                    }
                                 }
                                 // Mark we are done with the connection, so drain can complete
                                 drop(drain);
                                 debug!(component="socks5", dur=?start.elapsed(), "connection completed");
                             }).instrument(span);
 
-                            assertions::size_between_ref(1000, 2000, &serve);
+                            assertions::size_between_ref(1000, 3000, &serve);
                             tokio::spawn(serve);
                         }
                         Err(e) => {
@@ -138,7 +140,7 @@ impl Socks5 {
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6
-async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(), OutboundProxyError> {
+async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> std::result::Result<(), anyhow::Error> {
     let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
 
     // Version(5), Number of auth methods
@@ -173,11 +175,14 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
     let version = version_command[0];
 
     if version != 0x05 {
-        return Err(OutboundProxyError::CommandNotSupported.into());
+        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+        return Ok(send_response(Some(OutboundProxyError::CommandNotSupported), &mut stream, dummy_addr).await?);
+        // return Err(OutboundProxyError::CommandNotSupported.into());
     }
 
     if version_command[1] != 1 {
-        return Err(OutboundProxyError::CommandNotSupported.into());
+        let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+        return Ok(send_response(Some(OutboundProxyError::CommandNotSupported), &mut stream, dummy_addr).await?);
     }
 
     // Skip RSV
@@ -187,18 +192,17 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
     let mut atyp = [0u8];
     stream.read_exact(&mut atyp).await?;
 
-    let ip;
 
-    match atyp[0] {
+    let ip = match atyp[0] {
         0x01 => {
             let mut hostb = [0u8; 4];
             stream.read_exact(&mut hostb).await?;
-            ip = IpAddr::V4(hostb.into());
+            IpAddr::V4(hostb.into())
         }
         0x04 => {
             let mut hostb = [0u8; 16];
             stream.read_exact(&mut hostb).await?;
-            ip = IpAddr::V6(hostb.into());
+            IpAddr::V6(hostb.into())
         }
         0x03 => {
             let mut domain_length = [0u8];
@@ -214,9 +218,19 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
                 ));
             };
 
-            ip = dns_lookup(resolver.clone(), remote_addr, ds).await?;
+            match dns_lookup(resolver.clone(), remote_addr, ds).await {
+                Ok(ip) => ip,
+                Err(e) => {
+
+                    let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+                    return Ok(send_response(Some(OutboundProxyError::HostUnreachable), &mut stream, dummy_addr).await?);
+                    return Err(OutboundProxyError::HostUnreachable.into());
+                }
+            }
         }
         _ => {
+            let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+            return Ok(send_response(Some(OutboundProxyError::HostUnreachable), &mut stream, dummy_addr).await?);
             return Err(OutboundProxyError::HostUnreachable.into());
         }
     };
@@ -293,6 +307,7 @@ pub async fn send_response(
     source: &mut TcpStream,
     local: SocketAddr,
 ) -> Result<(), Error> {
+    tracing::error!("howardjohn: respond {err:?}");
     // https://www.rfc-editor.org/rfc/rfc1928#section-6
     let mut buf: Vec<u8> = Vec::with_capacity(10);
     buf.push(0x05); // version
