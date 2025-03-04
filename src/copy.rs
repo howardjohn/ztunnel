@@ -127,12 +127,12 @@ pub trait ResizeBufRead {
 // Initially we create a 1k buffer for each connection. Note currently there are 3 buffers per connection.
 // Outbound: downstream to app. Upstream HBONE is optimized to avoid.
 // Inbound: downstream HBONE, upstream to app. Downstream HBONE can be optimized, but is not yet.
-const INITIAL_BUFFER_SIZE: usize = 1024;
+const INITIAL_BUFFER_SIZE: usize = 16_384 - 64;
 // We increase up to 16k for high traffic connections.
 // TLS record size max is 16k. But we also have an H2 frame header, so leave a bit of room for that.
 const LARGE_BUFFER_SIZE: usize = 16_384 - 64;
 // For ultra-high bandwidth connections, increase up to 256Kb
-const JUMBO_BUFFER_SIZE: usize = (16 * 16_384) - 64;
+const JUMBO_BUFFER_SIZE: usize = (16_384) - 64;
 // After 128k of data we will trigger a resize from INITIAL to LARGE
 // Loosely inspired by https://github.com/golang/go/blame/5122a6796ef98e3453c994c95abd640596540bea/src/crypto/tls/conn.go#L873
 const RESIZE_THRESHOLD_LARGE: u64 = 128 * 1024;

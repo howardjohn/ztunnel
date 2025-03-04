@@ -616,7 +616,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
-        frame_size: 1024 * 1024,
+        frame_size: 16_384 - 64,
 
         self_termination_deadline: match parse_duration(CONNECTION_TERMINATION_DEADLINE)? {
             Some(period) => period,

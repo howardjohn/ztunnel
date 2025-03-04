@@ -18,7 +18,7 @@ use std::sync::Arc;
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
 use std::time::Instant;
-
+use tokio::io;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
@@ -213,8 +213,30 @@ impl OutboundConnection {
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-        copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
+
+        let key = Box::new(WorkloadKey {
+            src_id: req.source.identity(),
+            // Clone here shouldn't be needed ideally, we could just take ownership of Request.
+            // But that
+            dst_id: req.upstream_sans.clone(),
+            src: remote_addr.ip(),
+            dst: req.actual_destination,
+        });
+        let cert = self.pi.local_workload_information.fetch_certificate().await?;
+        let connector = cert.outbound_connector(key.dst_id.clone())?;
+        let tcp_stream = super::freebind_connect(
+            None, // No need to spoof source IP on outbound
+            req.actual_destination,
+            self.pi.socket_factory.as_ref(),
+        )
+          .await
+          .map_err(|e: io::Error| match e.kind() {
+              io::ErrorKind::TimedOut => Error::MaybeHBONENetworkPolicyError(e),
+              _ => e.into(),
+          })?;
+
+        let tls_stream = connector.connect(tcp_stream).await?;
+        copy::copy_bidirectional(copy::TcpStreamSplitter(stream), tls_stream, connection_stats).await
     }
 
     async fn send_hbone_request(

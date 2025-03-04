@@ -18,11 +18,12 @@ use http::{Method, Response, StatusCode};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::net::TcpStream;
 use tokio::sync::watch;
+use tokio_rustls::TlsStream;
+use tracing::{Instrument, debug, error, info, info_span, trace, trace_span};
 
-use tracing::{Instrument, debug, info, info_span, trace_span};
-
-use super::{ConnectionResult, Error, LocalWorkloadInformation, ResponseFlags};
+use super::{ConnectionResult, Error, LocalWorkloadInformation, ResponseFlags, util};
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
@@ -35,7 +36,7 @@ use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
-use crate::{assertions, copy, handle_connection, proxy, socket, strng, tls};
+use crate::{assertions, copy, handle_connection, proxy, rbac, socket, strng, tls};
 
 use crate::drain::run_with_drain;
 use crate::proxy::h2;
@@ -90,54 +91,29 @@ impl Inbound {
         let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             async move {
                 while let Some(tls) = stream.next().await {
-                    let pi = self.pi.clone();
-                    let (raw_socket, ssl) = tls.get_ref();
-                    let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
-                    let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
-                    let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
+                    let start = Instant::now();
+                    let mut force_shutdown = force_shutdown.clone();
                     let drain = drain.clone();
-                    let force_shutdown = force_shutdown.clone();
-                    let network = pi.cfg.network.clone();
-                    let serve_client = async move {
-                        let conn = Connection {
-                            src_identity,
-                            src,
-                            dst_network: strng::new(&network), // inbound request must be on our network
-                            dst,
-                        };
-                        debug!(%conn, "accepted connection");
-                        let cfg = pi.cfg.clone();
-                        let request_handler = move |req| {
-                            let id = Self::extract_traceparent(&req);
-                            let peer = conn.src;
-                            let req_handler = Self::serve_connect(
-                                pi.clone(),
-                                conn.clone(),
-                                self.enable_orig_src,
-                                req,
-                            )
-                            .instrument(info_span!("inbound", %id, %peer));
-                            // This is for each user connection, so most important to keep small
-                            assertions::size_between_ref(1500, 2500, &req_handler);
-                            req_handler
-                        };
+                    let src = to_canonical("127.0.0.1:1".parse().unwrap());
+                    let pi = self.pi.clone();
+                            let serve_client = async move {
+                                debug!(component="inbound passthrough", "connection started");
+                                // Since this task is spawned, make sure we are guaranteed to terminate
+                                tokio::select! {
+                                    _ = force_shutdown.changed() => {
+                                        debug!(component="inbound passthrough", "connection forcefully terminated");
+                                    }
+                                    _ = Self::proxy_inbound_plaintext(pi, socket::to_canonical(src), tls, self.enable_orig_src) => {
+                                    }
+                                }
+                                // Mark we are done with the connection, so drain can complete
+                                drop(drain);
+                                debug!(component="inbound passthrough", dur=?start.elapsed(), "connection completed");
+                            }
+                              .in_current_span();
 
-                        let serve_conn = h2::server::serve_connection(
-                            cfg,
-                            tls,
-                            drain,
-                            force_shutdown,
-                            request_handler,
-                        );
-                        // This is per HBONE connection, so while would be nice to be small, at least it
-                        // is pooled so typically fewer of these.
-                        let serve = Box::pin(assertions::size_between(6000, 8000, serve_conn));
-                        serve.await
-                    };
-                    // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
-                    // and measured above.
-                    assertions::size_between_ref(1000, 1500, &serve_client);
-                    tokio::task::spawn(serve_client.in_current_span());
+                            assertions::size_between_ref(1500, 3000, &serve_client);
+                            tokio::spawn(serve_client);
                 }
             }
             .in_current_span()
@@ -250,6 +226,126 @@ impl Inbound {
         ri.result_tracker.record(res);
     }
 
+    async fn proxy_inbound_plaintext(
+        pi: Arc<ProxyInputs>,
+        source_addr: SocketAddr,
+        inbound_stream: tokio_rustls::server::TlsStream<TcpStream>,
+        enable_orig_src: bool,
+    ) {
+        let start = Instant::now();
+        let (tcp, _) = inbound_stream.get_ref();
+        let dest_addr = "127.0.0.1:8080".parse::<SocketAddr>().unwrap();
+        // Check if it is an illegal call to ourself, which could trampoline to illegal addresses or
+        // lead to infinite loops
+        let illegal_call = pi.cfg.illegal_ports.contains(&dest_addr.port());
+        if illegal_call {
+            metrics::log_early_deny(
+                source_addr,
+                dest_addr,
+                Reporter::destination,
+                Error::SelfCall,
+            );
+            return;
+        }
+        let upstream_workload = match pi.local_workload_information.get_workload().await {
+            Ok(upstream_workload) => upstream_workload,
+            Err(e) => {
+                metrics::log_early_deny(source_addr, dest_addr, Reporter::destination, e);
+                return;
+            }
+        };
+        let upstream_services = pi.state.get_services_by_workload(&upstream_workload);
+
+        let rbac_ctx = crate::state::ProxyRbacContext {
+            conn: rbac::Connection {
+                src_identity: None,
+                src: source_addr,
+                // inbound request must be on our network since this is passthrough
+                // rather than HBONE, which can be tunneled across networks through gateways.
+                // by definition, without the gateway our source must be on our network.
+                dst_network: strng::new(&pi.cfg.network),
+                dst: dest_addr,
+            },
+            dest_workload: upstream_workload.clone(),
+        };
+
+        // Find source info. We can lookup by XDS or from connection attributes
+        let source_workload = {
+            let network_addr_srcip = NetworkAddress {
+                // inbound request must be on our network since this is passthrough
+                // rather than HBONE, which can be tunneled across networks through gateways.
+                // by definition, without the gateway our source must be on our network.
+                network: pi.cfg.network.as_str().into(),
+                address: source_addr.ip(),
+            };
+            pi.state
+                .fetch_workload_by_address(&network_addr_srcip)
+                .await
+        };
+        let derived_source = metrics::DerivedWorkload {
+            identity: rbac_ctx.conn.src_identity.clone(),
+            ..Default::default()
+        };
+        let ds = proxy::guess_inbound_service(
+            &rbac_ctx.conn,
+            &None,
+            upstream_services,
+            &upstream_workload,
+        );
+        let result_tracker = Box::new(metrics::ConnectionResult::new(
+            source_addr,
+            dest_addr,
+            None,
+            start,
+            metrics::ConnectionOpen {
+                reporter: Reporter::destination,
+                source: source_workload,
+                derived_source: Some(derived_source),
+                destination: Some(upstream_workload),
+                connection_security_policy: metrics::SecurityPolicy::unknown,
+                destination_service: ds,
+            },
+            pi.metrics.clone(),
+        ));
+
+        let mut conn_guard = match pi
+            .connection_manager
+            .assert_rbac(&pi.state, &rbac_ctx, None)
+            .await
+        {
+            Ok(cg) => cg,
+            Err(e) => {
+                result_tracker
+                    .record_with_flag(Err(e), metrics::ResponseFlags::AuthorizationPolicyDenied);
+                return;
+            }
+        };
+
+        let orig_src = if enable_orig_src {
+            Some(source_addr.ip())
+        } else {
+            None
+        };
+
+        let send = async {
+            trace!(%source_addr, %dest_addr, component="inbound plaintext", "connecting...");
+
+            let outbound = super::freebind_connect(orig_src, dest_addr, pi.socket_factory.as_ref())
+                .await
+                .map_err(Error::ConnectionFailed)?;
+
+            trace!(%source_addr, destination=%dest_addr, component="inbound plaintext", "connected");
+            copy::copy_bidirectional(
+                inbound_stream,
+                copy::TcpStreamSplitter(outbound),
+                &result_tracker,
+            )
+            .await
+        };
+
+        let res = handle_connection!(conn_guard, send);
+        result_tracker.record(res);
+    }
     async fn build_inbound_request(
         pi: &Arc<ProxyInputs>,
         conn: Connection,
